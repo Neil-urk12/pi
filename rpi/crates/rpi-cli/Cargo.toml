@@ -1,0 +1,22 @@
+[package]
+name = "rpi-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "rpi"
+path = "src/main.rs"
+
+[dependencies]
+rpi-core = { workspace = true }
+rpi-ai = { workspace = true }
+rpi-tools = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
