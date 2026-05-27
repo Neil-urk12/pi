@@ -12,6 +12,7 @@ path = "src/main.rs"
 rpi-core = { workspace = true }
 rpi-ai = { workspace = true }
 rpi-tools = { workspace = true }
+rpi-tui = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }

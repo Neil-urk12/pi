@@ -43,6 +43,7 @@ rpi-cli
 - **Configuration management**: JSON config file with env var overrides
 - **Extensible tool system**: Implement the `Tool` trait to add custom tools
 - **Agent loop**: Automatic tool call execution with iteration limits
+- **Experimental Rust TUI**: `rpi --tui` enables rich streaming markdown rendering in interactive mode
 
 ## Building
 
@@ -73,6 +74,9 @@ rpi -v -p "What is 2+2?"
 ```bash
 # Start interactive session
 rpi
+
+# Start interactive session with experimental rich TUI rendering
+rpi --tui
 
 # With specific model
 rpi -m openai/gpt-4o
@@ -179,7 +183,7 @@ cargo clippy
 | Binary size | ~50MB (Node.js runtime) | ~30MB (static binary) |
 | Startup time | ~200ms | ~10ms |
 | Memory usage | ~100MB baseline | ~10MB baseline |
-| TUI | Full differential rendering | Not yet implemented |
+| TUI | Full differential rendering | Experimental `--tui` first slice |
 | Extensions | TypeScript plugins | Not yet implemented |
 | Providers | 9 providers | 3 providers (extensible) |
 | Tools | 7 built-in tools | 6 built-in tools |

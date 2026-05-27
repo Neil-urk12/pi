@@ -8,6 +8,7 @@ mod interactive;
 
 use agent::AgentRunner;
 use config::Config;
+use rpi_cli::validate_tui_mode;
 
 #[derive(Parser)]
 #[command(name = "rpi", about = "Pi coding agent - Rust port", version)]
@@ -27,6 +28,10 @@ struct Cli {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Enable the experimental Rust TUI renderer in interactive mode
+    #[arg(long)]
+    tui: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -54,6 +59,10 @@ enum ConfigAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let interactive_mode = cli.prompt.is_none()
+        && !cli.list_models
+        && !matches!(cli.command, Some(Commands::Config { .. }));
+    validate_tui_mode(interactive_mode, cli.tui)?;
 
     // Initialize tracing
     let filter = if cli.verbose {
@@ -90,7 +99,11 @@ async fn main() -> Result<()> {
                 runner.list_models().await?;
             } else {
                 // Interactive mode
-                interactive::run(&mut runner).await?;
+                if cli.tui {
+                    interactive::run_tui(&mut runner).await?;
+                } else {
+                    interactive::run(&mut runner).await?;
+                }
             }
         }
     }

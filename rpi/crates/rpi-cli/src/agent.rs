@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
-use rpi_core::*;
 use rpi_ai::create_provider;
+use rpi_core::*;
 use rpi_tools::ToolRegistry;
+use rpi_tui::{DefaultTheme, Frame, TerminalBackend, TuiEvent, TurnView};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::config::Config;
+use rpi_cli::safe_tool_summary;
 
 pub struct AgentRunner {
     config: Config,
@@ -14,7 +16,6 @@ pub struct AgentRunner {
     messages: Vec<Message>,
     system_prompt: Option<String>,
     tool_registry: ToolRegistry,
-    working_dir: PathBuf,
 }
 
 impl AgentRunner {
@@ -30,85 +31,151 @@ impl AgentRunner {
             messages: Vec::new(),
             system_prompt,
             tool_registry,
-            working_dir,
         })
     }
 
     pub async fn run_prompt(&mut self, prompt: &str) -> Result<String> {
-        // Add user message
-        self.messages.push(Message {
-            role: Role::User,
-            content: Some(MessageContent::Text(prompt.to_string())),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        });
-
-        // Build provider
-        let (provider, model_name) = self.build_provider()?;
-        let agent_config = self.build_agent_config(&model_name);
-
-        // Get tool definitions from registry
-        let tool_defs: Vec<ToolDefinition> = self.tool_registry.definitions();
-
-        // Run agent loop with streaming
-        let mut final_text = String::new();
-        let config = AgentLoopConfig {
-            max_tool_rounds: 20,
-            stream: true,
-        };
-
-        run_agent_loop(
-            provider.as_ref(),
-            &model_name,
-            &mut self.messages,
-            &self.tool_registry.tools(),
-            &config,
-            &agent_config,
-            |event| match event {
-                AgentEvent::TextDelta { text } => {
-                    print!("{text}");
-                    io::stdout().flush().ok();
-                    final_text.push_str(&text);
+        self.run_prompt_with_observer(prompt, |event| match event {
+            AgentEvent::TextDelta { text } => {
+                print!("{text}");
+                let _ = io::stdout().flush();
+            }
+            AgentEvent::TurnStart { .. } => {}
+            AgentEvent::TurnEnd { .. } => {
+                println!();
+            }
+            AgentEvent::ToolExecutionStart { name, .. } => {
+                eprintln!("\n[Tool: {name}]");
+            }
+            AgentEvent::ToolExecutionEnd {
+                result, is_error, ..
+            } => {
+                if *is_error {
+                    eprintln!("[Error: {result}]");
+                } else {
+                    let preview = truncate_chars(result, 200);
+                    eprintln!("[Result: {preview}]");
                 }
-                AgentEvent::TurnStart { .. } => {}
-                AgentEvent::TurnEnd { .. } => {
-                    println!();
-                }
-                AgentEvent::ToolExecutionStart { name, .. } => {
-                    eprintln!("\n[Tool: {name}]");
+            }
+            AgentEvent::Done { turns, total_usage } => {
+                eprintln!(
+                    "\n[Completed in {turns} turns, {} tokens]",
+                    total_usage.total_tokens
+                );
+            }
+            AgentEvent::Error { error } => {
+                eprintln!("\n[Error: {error}]");
+            }
+            _ => {}
+        })
+        .await
+    }
+
+    pub async fn run_prompt_tui(&mut self, prompt: &str) -> Result<String> {
+        let width = TerminalBackend::terminal_width().unwrap_or(80);
+        let mut view = TurnView::new(DefaultTheme::default(), width);
+        let mut previous_frame = Frame::default();
+        let mut tool_summaries: HashMap<String, (String, Option<String>)> = HashMap::new();
+        let color = TerminalBackend::should_color();
+
+        self.run_prompt_with_observer(prompt, |event| {
+            let tui_event = match event {
+                AgentEvent::TextDelta { text } => Some(TuiEvent::AssistantDelta(text.clone())),
+                AgentEvent::ToolExecutionStart {
+                    id,
+                    name,
+                    arguments,
+                } => {
+                    let summary = safe_tool_summary(name, arguments);
+                    tool_summaries.insert(id.clone(), (name.clone(), summary.clone()));
+                    Some(TuiEvent::ToolStarted {
+                        name: name.clone(),
+                        summary,
+                    })
                 }
                 AgentEvent::ToolExecutionEnd {
-                    result, is_error, ..
+                    id, name, is_error, ..
                 } => {
-                    if is_error {
-                        eprintln!("[Error: {result}]");
-                    } else {
-                        // Show truncated result
-                        let preview = if result.len() > 200 {
-                            format!("{}...", &result[..200])
-                        } else {
-                            result.clone()
-                        };
-                        eprintln!("[Result: {preview}]");
-                    }
+                    let summary = tool_summaries.remove(id).and_then(|(_, summary)| summary);
+                    Some(TuiEvent::ToolFinished {
+                        name: name.clone(),
+                        summary,
+                        is_error: *is_error,
+                    })
                 }
-                AgentEvent::Done { turns, total_usage } => {
-                    eprintln!(
-                        "\n[Completed in {turns} turns, {} tokens]",
-                        total_usage.total_tokens
-                    );
+                AgentEvent::TurnEnd { .. } | AgentEvent::Done { .. } => {
+                    Some(TuiEvent::TurnFinished)
                 }
-                AgentEvent::Error { error } => {
-                    eprintln!("\n[Error: {error}]");
-                }
-                _ => {}
-            },
-        )
-        .await
-        .context("Agent loop failed")?;
+                AgentEvent::Error { error } => Some(TuiEvent::RendererWarning(error.clone())),
+                _ => None,
+            };
 
-        Ok(final_text)
+            if let Some(tui_event) = tui_event {
+                let decision = view.apply_event(tui_event);
+                if decision.should_render {
+                    let next_frame = view.render_frame();
+                    let encoded = TerminalBackend::encode_active_region_update(
+                        &previous_frame,
+                        &next_frame,
+                        color,
+                    );
+                    print!("{encoded}");
+                    let _ = io::stdout().flush();
+                    previous_frame = next_frame;
+                }
+            }
+        })
+        .await
+    }
+
+    fn run_prompt_with_observer<'a, F>(
+        &'a mut self,
+        prompt: &'a str,
+        mut observer: F,
+    ) -> impl std::future::Future<Output = Result<String>> + 'a
+    where
+        F: FnMut(&AgentEvent) + 'a,
+    {
+        async move {
+            // Add user message
+            self.messages.push(Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(prompt.to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            });
+
+            // Build provider
+            let (provider, model_name) = self.build_provider()?;
+            let agent_config = self.build_agent_config(&model_name);
+
+            // Run agent loop with streaming
+            let mut final_text = String::new();
+            let config = AgentLoopConfig {
+                max_tool_rounds: 20,
+                stream: true,
+            };
+
+            run_agent_loop(
+                provider.as_ref(),
+                &model_name,
+                &mut self.messages,
+                &self.tool_registry.tools(),
+                &config,
+                &agent_config,
+                |event| {
+                    observer(&event);
+                    if let AgentEvent::TextDelta { text } = event {
+                        final_text.push_str(&text);
+                    }
+                },
+            )
+            .await
+            .context("Agent loop failed")?;
+
+            Ok(final_text)
+        }
     }
 
     pub async fn list_models(&self) -> Result<()> {
@@ -142,17 +209,14 @@ impl AgentRunner {
                 )
             })?;
 
-        let base_url = self.config.get_base_url(&model_id.provider).map(String::from);
+        let base_url = self
+            .config
+            .get_base_url(&model_id.provider)
+            .map(String::from);
 
         let provider_config = match model_id.provider.as_str() {
-            "openai" | "azure" => ProviderConfig::OpenAi {
-                api_key,
-                base_url,
-            },
-            "anthropic" => ProviderConfig::Anthropic {
-                api_key,
-                base_url,
-            },
+            "openai" | "azure" => ProviderConfig::OpenAi { api_key, base_url },
+            "anthropic" => ProviderConfig::Anthropic { api_key, base_url },
             "ollama" => ProviderConfig::Ollama {
                 base_url: base_url.unwrap_or_else(|| "http://localhost:11434".to_string()),
             },
@@ -180,10 +244,6 @@ impl AgentRunner {
         &self.config
     }
 
-    pub fn messages(&self) -> &[Message] {
-        &self.messages
-    }
-
     pub fn clear_messages(&mut self) {
         self.messages.clear();
     }
@@ -191,4 +251,16 @@ impl AgentRunner {
     pub fn model_display(&self) -> &str {
         &self.model
     }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            output.push_str("...");
+            return output;
+        }
+        output.push(ch);
+    }
+    output
 }

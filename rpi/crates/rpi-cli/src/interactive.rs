@@ -42,10 +42,7 @@ pub async fn run(runner: &mut AgentRunner) -> Result<()> {
                     continue;
                 }
                 "/config" => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(runner.config())?
-                    );
+                    println!("{}", serde_json::to_string_pretty(runner.config())?);
                     continue;
                 }
                 "/model" => {
@@ -68,6 +65,66 @@ pub async fn run(runner: &mut AgentRunner) -> Result<()> {
                 eprintln!("Error: {e}");
             }
         }
+    }
+
+    Ok(())
+}
+
+pub async fn run_tui(runner: &mut AgentRunner) -> Result<()> {
+    println!("rpi - Pi Coding Agent (Rust TUI)");
+    println!("Type your message, /help for commands, or /quit to exit.\n");
+
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    loop {
+        print!("> ");
+        stdout.flush()?;
+
+        let mut input = String::new();
+        if stdin.lock().read_line(&mut input)? == 0 {
+            break;
+        }
+
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        if input.starts_with('/') {
+            match input {
+                "/quit" | "/exit" | "/q" => {
+                    println!("Goodbye!");
+                    break;
+                }
+                "/help" | "/h" => {
+                    print_help();
+                    continue;
+                }
+                "/clear" | "/c" => {
+                    runner.clear_messages();
+                    println!("Conversation cleared.");
+                    continue;
+                }
+                "/config" => {
+                    println!("{}", serde_json::to_string_pretty(runner.config())?);
+                    continue;
+                }
+                "/model" => {
+                    println!("Current model: {}", runner.model_display());
+                    continue;
+                }
+                _ => {
+                    println!("Unknown command: {input}. Type /help for available commands.");
+                    continue;
+                }
+            }
+        }
+
+        if let Err(error) = runner.run_prompt_tui(input).await {
+            eprintln!("TUI error: {error}");
+        }
+        println!();
     }
 
     Ok(())

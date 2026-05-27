@@ -1,0 +1,12 @@
+[package]
+name = "rpi-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crossterm = { workspace = true }
+pulldown-cmark = { workspace = true }
+unicode-width = { workspace = true }
+thiserror = { workspace = true }
+
