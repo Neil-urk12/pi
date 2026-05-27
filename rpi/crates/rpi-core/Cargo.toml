@@ -1,0 +1,38 @@
+[package]
+name = "rpi-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types and traits for the pi coding agent Rust port"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# Chrono
+chrono = { workspace = true }
+
+# Async streams
+futures = { workspace = true }
+
+# File system
+dirs = { workspace = true }
+# Async traits
+async-trait = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+[lints.rust]
+# Deny missing docs for library crate
+missing_docs = "warn"
