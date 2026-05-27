@@ -230,7 +230,7 @@ impl AgentRunner {
     fn build_agent_config(&self, model_name: &str) -> AgentConfig {
         AgentConfig {
             model: ModelId::new(
-                self.model.splitn(2, '/').next().unwrap_or("openai"),
+                self.model.split('/').next().unwrap_or("openai"),
                 model_name,
             ),
             max_tokens: self.config.max_tokens,

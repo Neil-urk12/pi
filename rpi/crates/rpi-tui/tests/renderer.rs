@@ -125,3 +125,111 @@ fn terminal_backend_encodes_ansi_at_boundary() {
     assert!(encoded.contains("\x1b["));
     assert!(encoded.contains("bold"));
 }
+
+
+#[test]
+fn markdown_renderer_drops_raw_html() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("Hello <script>alert('xss')</script> world", 40);
+    let text = frame.to_plain_text();
+    assert!(!text.contains("<script>"), "raw HTML should be stripped");
+    assert!(text.contains("Hello"));
+    assert!(text.contains("world"));
+}
+
+#[test]
+fn turn_view_strips_control_chars_from_tool_summary() {
+    let mut view = TurnView::new(DefaultTheme::default(), 80);
+    view.apply_event(TuiEvent::ToolStarted {
+        name: "read_file".into(),
+        summary: Some("path\x1b[2Jevil".into()),
+    });
+    let frame = view.render_frame();
+    let text = frame.to_plain_text();
+    assert!(!text.contains("\x1b"), "control chars should be stripped from tool output");
+    assert!(text.contains("read_file"));
+}
+
+#[test]
+fn strip_ansi_csi_sequence_no_residue() {
+    let mut view = TurnView::new(DefaultTheme::default(), 80);
+    view.apply_event(TuiEvent::ToolStarted {
+        name: "test".into(),
+        summary: Some("\x1b[2Jcleared".into()),
+    });
+    let text = view.render_frame().to_plain_text();
+    assert!(!text.contains("[2J"), "CSI sequence residue should be stripped, got: {text:?}");
+    assert!(text.contains("cleared"));
+}
+
+#[test]
+fn strip_ansi_color_sequence_full() {
+    let mut view = TurnView::new(DefaultTheme::default(), 80);
+    view.apply_event(TuiEvent::ToolStarted {
+        name: "test".into(),
+        summary: Some("\x1b[31mred\x1b[0m".into()),
+    });
+    let text = view.render_frame().to_plain_text();
+    assert!(!text.contains("[31m"), "color sequence residue should be stripped, got: {text:?}");
+    assert!(!text.contains("[0m"), "reset sequence residue should be stripped, got: {text:?}");
+    assert!(text.contains("red"));
+}
+
+#[test]
+fn strip_ansi_osc_sequence() {
+    let mut view = TurnView::new(DefaultTheme::default(), 80);
+    view.apply_event(TuiEvent::ToolStarted {
+        name: "test".into(),
+        summary: Some("\x1b]0;title\x07visible".into()),
+    });
+    let text = view.render_frame().to_plain_text();
+    assert!(!text.contains("title"), "OSC payload should be stripped, got: {text:?}");
+    assert!(text.contains("visible"));
+}
+
+#[test]
+fn strip_multiple_ansi_sequences() {
+    let mut view = TurnView::new(DefaultTheme::default(), 80);
+    view.apply_event(TuiEvent::ToolStarted {
+        name: "test".into(),
+        summary: Some("\x1b[1m\x1b[32mhello\x1b[0m world".into()),
+    });
+    let text = view.render_frame().to_plain_text();
+    assert!(!text.contains("\x1b"), "all ESC should be stripped, got: {text:?}");
+    assert!(text.contains("hello world"), "should contain stripped text, got: {text:?}");
+}
+
+#[test]
+fn strip_preserves_whitespace() {
+    let mut view = TurnView::new(DefaultTheme::default(), 80);
+    view.apply_event(TuiEvent::ToolStarted {
+        name: "test".into(),
+        summary: Some("hello\tworld\n".into()),
+    });
+    let text = view.render_frame().to_plain_text();
+    assert!(text.contains("hello\tworld\n"), "tabs and newlines should be preserved, got: {text:?}");
+}
+
+#[test]
+fn strip_dcs_sequence() {
+    let mut view = TurnView::new(DefaultTheme::default(), 80);
+    view.apply_event(TuiEvent::ToolStarted {
+        name: "test".into(),
+        summary: Some("\x1bP$evil_command\x1b\\safe".into()),
+    });
+    let text = view.render_frame().to_plain_text();
+    assert!(!text.contains("evil_command"), "DCS body should be stripped, got: {text:?}");
+    assert!(text.contains("safe"));
+}
+
+#[test]
+fn strip_pm_apc_sequences() {
+    let mut view = TurnView::new(DefaultTheme::default(), 80);
+    view.apply_event(TuiEvent::ToolStarted {
+        name: "test".into(),
+        summary: Some("\x1b^secret\x1b\\ok".into()),
+    });
+    let text = view.render_frame().to_plain_text();
+    assert!(!text.contains("secret"), "PM body should be stripped, got: {text:?}");
+    assert!(text.contains("ok"));
+}

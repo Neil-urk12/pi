@@ -152,11 +152,9 @@ impl FrameLine {
             return;
         }
 
-        if let Some(last) = self.spans.last_mut() {
-            if last.style == style {
-                last.text.push_str(&text);
-                return;
-            }
+        if let Some(last) = self.spans.last_mut() && last.style == style {
+            last.text.push_str(&text);
+            return;
         }
 
         self.spans.push(StyledSpan::new(text, style));
@@ -294,9 +292,7 @@ impl FrameBuilder {
                     let marker = if checked { "[x] " } else { "[ ] " };
                     self.append(marker, self.theme.list_marker);
                 }
-                Event::Html(html) | Event::InlineHtml(html) => {
-                    self.append(html.as_ref(), self.style)
-                }
+                Event::Html(_) | Event::InlineHtml(_) => {}
                 Event::FootnoteReference(reference) => self.append(reference.as_ref(), self.style),
                 _ => {}
             }
@@ -604,7 +600,7 @@ impl TurnView {
 
 fn format_tool_line(status: &str, name: &str, summary: Option<&str>) -> String {
     match summary {
-        Some(summary) if !summary.is_empty() => format!("{status} {name}: {summary}"),
+        Some(summary) if !summary.is_empty() => format!("{status} {name}: {}", strip_control_chars(summary)),
         _ => format!("{status} {name}"),
     }
 }
@@ -698,4 +694,75 @@ fn ansi_prefix(style: Style) -> String {
     } else {
         format!("\x1b[{}m", codes.join(";"))
     }
+}
+
+fn strip_control_chars(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            // ESC - start of escape sequence
+            '\x1b' => {
+                match chars.peek() {
+                    Some(&'[') => {
+                        // CSI sequence: ESC [ ... final_char (0x40-0x7E)
+                        chars.next(); // consume '['
+                        while let Some(&next) = chars.peek() {
+                            if (0x40..=0x7E).contains(&(next as u32)) {
+                                chars.next(); // consume final char
+                                break;
+                            }
+                            chars.next();
+                        }
+                    }
+                    Some(&']') => {
+                        // OSC sequence: ESC ] ... BEL or ESC \
+                        chars.next(); // consume ']'
+                        loop {
+                            match chars.next() {
+                                Some('\x07') => break, // BEL terminator
+                                Some('\x1b') => {
+                                    if chars.peek() == Some(&'\\') {
+                                        chars.next(); // consume backslash
+                                    }
+                                    break;
+                                }
+                                None => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    // String-bearing sequences: DCS(P), PM(^), APC(_), SOS(X)
+                    // Body terminated by ST (ESC \)
+                    Some(&'P') | Some(&'^') | Some(&'_') | Some(&'X') => {
+                        chars.next(); // consume Fe byte
+                        loop {
+                            match chars.next() {
+                                Some('\x1b') => {
+                                    if chars.peek() == Some(&'\\') {
+                                        chars.next();
+                                    }
+                                    break;
+                                }
+                                None => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    Some(&next) if (0x30..=0x7E).contains(&(next as u32)) => {
+                        // Simple ESC + char
+                        chars.next();
+                    }
+                    _ => {}
+                }
+            }
+            // Pass through printable chars and allowed whitespace
+            c if !c.is_control() || c == '\t' || c == '\n' || c == '\r' => {
+                result.push(c);
+            }
+            // Skip other control characters
+            _ => {}
+        }
+    }
+    result
 }

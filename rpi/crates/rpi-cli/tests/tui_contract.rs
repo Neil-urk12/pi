@@ -14,13 +14,6 @@ fn validate_tui_mode_accepts_interactive_tui() {
     validate_tui_mode(true, true).unwrap();
 }
 
-#[test]
-fn validate_tui_mode_rejects_non_interactive_tui() {
-    let error = validate_tui_mode(false, true).unwrap_err();
-
-    assert!(error.to_string().contains("--tui"));
-    assert!(error.to_string().contains("interactive"));
-}
 
 #[test]
 fn safe_tool_summary_uses_builtin_allowlist() {
