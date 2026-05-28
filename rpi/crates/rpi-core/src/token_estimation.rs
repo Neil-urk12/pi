@@ -38,6 +38,14 @@ fn detect_content_type(text: &str) -> ContentType {
     ContentType::Default
 }
 
+/// Check for semicolon-newline patterns that look like code (not prose).
+/// Matches `42;\n`, `);\n`, `};\n`, but not `done;\n`, `however;\n`.
+fn has_code_semicolons(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.ends_with(';')
+            && line.trim_end_matches(';').ends_with(|c: char| !c.is_ascii_lowercase())
+    })
+}
 /// Check if text contains structural patterns that indicate code.
 fn has_structural_patterns(text: &str) -> bool {
     // Patterns that strongly indicate code structure beyond just keywords
@@ -48,14 +56,14 @@ fn has_structural_patterns(text: &str) -> bool {
     text.contains("; ") ||
     text.ends_with(';') ||
     has_multi_line_indent(text) ||
-    text.contains(";\n") || // semicolon before newline (common in code)
+    has_code_semicolons(text) ||
     text.contains('\t') // tab indentation
 }
 
 /// Check if 3+ lines are indented (code blocks), avoiding false positives on
 /// markdown lists which typically have fewer indented lines.
 fn has_multi_line_indent(text: &str) -> bool {
-    text.lines().filter(|line| line.starts_with("    ")).take(3).count() >= 3
+    text.lines().filter(|line| line.starts_with("    ")).nth(2).is_some()
 }
 /// Check if text looks like programming code.
 fn is_code(text: &str) -> bool {
@@ -429,6 +437,29 @@ mod tests {
     fn test_has_structural_patterns_markdown_not_code() {
         let markdown = "Here is a list:\n\n    - Item one\n    - Item two\n    - Item three\n\nAnd some more text.";
         assert!(!is_code(markdown), "Markdown with 4-space indented list items should not be classified as code");
+    }
+
+    // FINDING: has_structural_patterns `;\n` false positive on prose
+    #[test]
+    fn test_has_structural_patterns_prose_with_semicolons() {
+        // Prose sentences can have semicolons ending a clause before a newline.
+        // ";\n" is not exclusive to code — it appears in natural language too.
+        let prose = "done;\nhowever, other things happen next.";
+        assert!(!has_structural_patterns(prose),
+            "Prose with semicolon-before-newline should not trigger structural code detection: {:?}",
+            prose
+        );
+    }
+
+    // FINDING: has_multi_line_indent refactor — positive case preservation
+    #[test]
+    fn test_has_structural_patterns_multiple_indented_lines() {
+        // Text with 3+ lines of 4-space indentation should be detected as structural.
+        // This verifies the filter().take(3).count() >= 3 logic (or its nth(2) refactor).
+        let indented = "let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;";
+        assert!(has_structural_patterns(indented),
+            "Text with 3+ indented lines should be detected as having structural patterns"
+        );
     }
 
 }
