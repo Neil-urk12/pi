@@ -169,6 +169,7 @@ fn openai_sse_to_chunks(
                     delta: None,
                     tool_calls: Vec::new(),
                     finish_reason: None,
+                    usage: None,
                 });
             }
 
@@ -183,6 +184,7 @@ fn openai_sse_to_chunks(
                         delta: None,
                         tool_calls: Vec::new(),
                         finish_reason: None,
+                        usage: None,
                     });
                 }
             };
@@ -217,6 +219,11 @@ fn openai_sse_to_chunks(
                 delta,
                 tool_calls,
                 finish_reason,
+                usage: chunk.usage.map(|u| Usage {
+                    prompt_tokens: u.prompt_tokens,
+                    completion_tokens: u.completion_tokens,
+                    total_tokens: u.total_tokens,
+                }),
             })
         }
     })
@@ -237,6 +244,13 @@ struct OpenAiRequest {
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Serialize)]
@@ -316,7 +330,10 @@ struct OpenAiStreamChunk {
     #[allow(dead_code)]
     id: String,
     choices: Vec<OpenAiStreamChoice>,
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
 }
+
 
 #[derive(Deserialize, Debug)]
 struct OpenAiStreamChoice {
@@ -378,6 +395,11 @@ fn build_request(
             )
         },
         stream,
+        stream_options: if stream {
+            Some(StreamOptions { include_usage: true })
+        } else {
+            None
+        },
         max_tokens: config.max_tokens,
         temperature: config.temperature,
     }

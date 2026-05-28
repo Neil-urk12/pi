@@ -257,6 +257,7 @@ fn process_anthropic_event(
                     delta: Some(text.clone()),
                     tool_calls: Vec::new(),
                     finish_reason: None,
+                    usage: None,
                 })),
                 AnthropicDelta::InputJsonDelta { partial_json } => {
                     state.tool_args_push(partial_json);
@@ -270,6 +271,7 @@ fn process_anthropic_event(
                             arguments_delta: Some(partial_json.clone()),
                         }],
                         finish_reason: None,
+                        usage: None,
                     }))
                 }
             }
@@ -290,6 +292,7 @@ fn process_anthropic_event(
                         arguments_delta: None,
                     }],
                     finish_reason: None,
+                    usage: None,
                 };
                 state.tool_args_clear();
                 state.current_block_type = None;
@@ -311,6 +314,11 @@ fn process_anthropic_event(
                 delta: None,
                 tool_calls: Vec::new(),
                 finish_reason,
+                usage: msg_delta.usage.map(|u| Usage {
+                    prompt_tokens: u.input_tokens,
+                    completion_tokens: u.output_tokens,
+                    total_tokens: u.input_tokens + u.output_tokens,
+                }),
             }))
         }
         _ => Ok(None),
@@ -435,6 +443,8 @@ enum AnthropicDelta {
 #[derive(Deserialize, Debug)]
 struct MessageDeltaEvent {
     delta: MessageDeltaInner,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
 }
 
 #[derive(Deserialize, Debug)]

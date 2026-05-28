@@ -10,6 +10,8 @@ mod traits;
 mod types;
 pub mod agent_loop;
 pub mod session;
+pub mod compaction;
+pub mod token_estimation;
 pub mod system_prompt;
 
 pub use error::{PiError, Result};
@@ -21,3 +23,5 @@ pub use types::{
 pub use agent_loop::{run_agent_loop, AgentEvent, AgentLoopConfig};
 pub use session::{Session, SessionEntry, SessionManager, SessionSummary};
 pub use system_prompt::{build_system_prompt, format_tool_call_for_display, format_tool_result_for_display};
+pub use token_estimation::{estimate_tokens, estimate_context_tokens};
+pub use compaction::{compact, find_cut_point, prepare_compaction, should_compact, CompactionPreparation, CompactionResult, CompactionSettings};

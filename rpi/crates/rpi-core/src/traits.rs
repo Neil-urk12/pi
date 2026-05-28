@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::types::{AgentConfig, ChatResponse, Message, ToolDefinition};
+use crate::types::{AgentConfig, ChatResponse, Message, ToolDefinition, Usage};
 
 /// A chunk streamed from a provider.
 #[derive(Debug, Clone)]
@@ -14,6 +14,8 @@ pub struct StreamChunk {
     pub tool_calls: Vec<ToolCallDelta>,
     /// Finish reason — only set in the final chunk.
     pub finish_reason: Option<crate::types::FinishReason>,
+    /// Usage stats for this chunk (typically only in the final chunk).
+    pub usage: Option<Usage>,
 }
 
 /// A partial tool call being streamed.

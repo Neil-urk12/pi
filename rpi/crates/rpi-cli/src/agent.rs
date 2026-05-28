@@ -128,54 +128,53 @@ impl AgentRunner {
         .await
     }
 
-    fn run_prompt_with_observer<'a, F>(
-        &'a mut self,
-        prompt: &'a str,
+    async fn run_prompt_with_observer<F>(
+        &mut self,
+        prompt: &str,
         mut observer: F,
-    ) -> impl std::future::Future<Output = Result<String>> + 'a
+    ) -> Result<String>
     where
-        F: FnMut(&AgentEvent) + 'a,
+        F: FnMut(&AgentEvent),
     {
-        async move {
-            // Add user message
-            self.messages.push(Message {
-                role: Role::User,
-                content: Some(MessageContent::Text(prompt.to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            });
+        // Add user message
+        self.messages.push(Message {
+            role: Role::User,
+            content: Some(MessageContent::Text(prompt.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
 
-            // Build provider
-            let (provider, model_name) = self.build_provider()?;
-            let agent_config = self.build_agent_config(&model_name);
+        // Build provider
+        let (provider, model_name) = self.build_provider()?;
+        let agent_config = self.build_agent_config(&model_name);
 
-            // Run agent loop with streaming
-            let mut final_text = String::new();
-            let config = AgentLoopConfig {
-                max_tool_rounds: 20,
-                stream: true,
-            };
+        // Run agent loop with streaming
+        let mut final_text = String::new();
+        let config = AgentLoopConfig {
+            max_tool_rounds: 20,
+            stream: true,
+            compaction: None,
+        };
 
-            run_agent_loop(
-                provider.as_ref(),
-                &model_name,
-                &mut self.messages,
-                &self.tool_registry.tools(),
-                &config,
-                &agent_config,
-                |event| {
-                    observer(&event);
-                    if let AgentEvent::TextDelta { text } = event {
-                        final_text.push_str(&text);
-                    }
-                },
-            )
-            .await
-            .context("Agent loop failed")?;
+        run_agent_loop(
+            provider.as_ref(),
+            &model_name,
+            &mut self.messages,
+            &self.tool_registry.tools(),
+            &config,
+            &agent_config,
+            |event| {
+                observer(&event);
+                if let AgentEvent::TextDelta { text } = event {
+                    final_text.push_str(&text);
+                }
+            },
+        )
+        .await
+        .context("Agent loop failed")?;
 
-            Ok(final_text)
-        }
+        Ok(final_text)
     }
 
     pub async fn list_models(&self) -> Result<()> {

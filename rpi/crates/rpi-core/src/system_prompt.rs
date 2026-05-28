@@ -56,7 +56,8 @@ pub fn format_tool_result_for_display(result: &str, is_error: bool) -> String {
     } else {
         // Truncate long results for display
         let truncated = if result.len() > 500 {
-            format!("{}...(truncated)", &result[..500])
+            let end = result.char_indices().nth(500).map(|(i, _)| i).unwrap_or(result.len());
+            format!("{}...(truncated)", &result[..end])
         } else {
             result.to_string()
         };
@@ -105,5 +106,24 @@ mod tests {
 
         let error_display = format_tool_result_for_display("not found", true);
         assert!(error_display.contains("Error:"));
+    }
+
+    #[test]
+    fn test_format_tool_result_truncates_utf8_safely() {
+        // Each 'ä' is 2 bytes in UTF-8
+        let mut result = String::new();
+        for _ in 0..300 {
+            result.push_str("ä");
+        }
+        // 600 bytes total, should truncate at 500 chars (not bytes)
+        let formatted = format_tool_result_for_display(&result, false);
+        assert!(formatted.contains("...(truncated)"));
+    }
+
+    #[test]
+    fn test_format_tool_result_short_string() {
+        let result = "short string";
+        let formatted = format_tool_result_for_display(result, false);
+        assert!(!formatted.contains("...(truncated)"));
     }
 }
