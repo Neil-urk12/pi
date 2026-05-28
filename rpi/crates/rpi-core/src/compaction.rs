@@ -679,4 +679,24 @@ mod tests {
         assert_eq!(s.keep_recent_tokens, 20_000);
         assert!(s.enabled);
     }
+
+    #[test]
+    fn test_find_cut_point_all_tool_messages() {
+        let messages = vec![
+            tool_result("result 1"),
+            tool_result("result 2"),
+            tool_result("result 3"),
+        ];
+        let result = find_cut_point(&messages, 1, None);
+        assert!(result.is_some(), "Should find a cut point even with all tool messages");
+        let (cut, _is_split) = result.unwrap();
+        assert!(cut < messages.len(), "Cut index must be within bounds");
+    }
+
+    #[test]
+    fn test_find_cut_point_single_message() {
+        let messages = vec![user_msg("hello")];
+        let result = find_cut_point(&messages, 100, None);
+        assert!(result.is_none(), "Single message should not produce a cut point");
+    }
 }

@@ -246,30 +246,25 @@ pub async fn run_agent_loop(
                     };
 
                     messages.push(assistant_msg.clone());
+                    let assistant_estimate = crate::token_estimation::estimate_tokens(&assistant_msg);
                     on_event(AgentEvent::TurnEnd {
                         turn,
                         message: assistant_msg,
                         usage: stream_usage.clone().or_else(|| {
-                            let est = crate::token_estimation::estimate_tokens(
-                                messages.last().expect("assistant message was just pushed"),
-                            );
                             Some(Usage {
                                 prompt_tokens: 0,
-                                completion_tokens: est,
-                                total_tokens: est,
+                                completion_tokens: assistant_estimate,
+                                total_tokens: assistant_estimate,
                             })
                         }),
                     });
 
                     // Update total usage — prefer actual API usage, fall back to heuristic.
                     let turn_usage = stream_usage.take().unwrap_or_else(|| {
-                        let est = crate::token_estimation::estimate_tokens(
-                            messages.last().expect("assistant message was just pushed"),
-                        );
                         Usage {
                             prompt_tokens: 0,
-                            completion_tokens: est,
-                            total_tokens: est,
+                            completion_tokens: assistant_estimate,
+                            total_tokens: assistant_estimate,
                         }
                     });
                     total_usage.prompt_tokens += turn_usage.prompt_tokens;
@@ -510,10 +505,6 @@ async fn try_compact(
     }
 }
 
-/// Escape XML tags in text to prevent injection into summary containers.
-fn escape_xml_tags(text: &str) -> String {
-    text.replace('<', "&lt;").replace('>', "&gt;")
-}
 /// Apply a compaction result: remove compacted messages, insert summary, extend with kept.
 fn apply_compaction(messages: &mut Vec<Message>, result: &crate::compaction::CompactionResult) {
     let kept: Vec<Message> = messages.drain(result.first_kept_message_index..).collect();

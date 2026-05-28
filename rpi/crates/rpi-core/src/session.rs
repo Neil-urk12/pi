@@ -5,7 +5,7 @@
 //! Compaction entries allow summarising old history while keeping recent messages.
 
 use crate::error::Result;
-use crate::types::{Message, MessageContent, Role};
+use crate::types::{escape_xml_tags, Message, MessageContent, Role};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -117,10 +117,6 @@ pub struct Session {
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
-/// Escape XML tags in text to prevent injection into summary containers.
-fn escape_xml_tags(text: &str) -> String {
-    text.replace('<', "&lt;").replace('>', "&gt;")
-}
 impl Session {
     /// Create a new session with a meta root and an initial leaf.
     pub fn new(model: impl Into<String>) -> Self {

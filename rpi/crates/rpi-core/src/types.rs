@@ -233,3 +233,22 @@ pub struct ChatResponse {
     /// Token usage for this request.
     pub usage: Usage,
 }
+
+/// Escape XML tags in text to prevent injection into summary containers.
+pub fn escape_xml_tags(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_xml_tags() {
+        assert_eq!(escape_xml_tags("hello"), "hello");
+        assert_eq!(escape_xml_tags("<test>"), "&lt;test&gt;");
+        assert_eq!(escape_xml_tags("a & b"), "a &amp; b");
+        assert_eq!(escape_xml_tags("<a>&</a>"), "&lt;a&gt;&amp;&lt;/a&gt;");
+        assert_eq!(escape_xml_tags(""), "");
+    }
+}

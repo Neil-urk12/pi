@@ -47,8 +47,15 @@ fn has_structural_patterns(text: &str) -> bool {
     text.contains("*/") ||
     text.contains("; ") ||
     text.ends_with(';') ||
-    text.contains("    ") || // 4-space indentation
-    text.contains("\t") // tab indentation
+    has_multi_line_indent(text) ||
+    text.contains(";\n") || // semicolon before newline (common in code)
+    text.contains('\t') // tab indentation
+}
+
+/// Check if 3+ lines are indented (code blocks), avoiding false positives on
+/// markdown lists which typically have fewer indented lines.
+fn has_multi_line_indent(text: &str) -> bool {
+    text.lines().filter(|line| line.starts_with("    ")).take(3).count() >= 3
 }
 /// Check if text looks like programming code.
 fn is_code(text: &str) -> bool {
@@ -416,6 +423,12 @@ mod tests {
         // 1_000_000 / 4 = 250_000 — well within u32 range
         assert_eq!(tokens, 250_000);
         let _: u32 = tokens; // type check
+    }
+
+    #[test]
+    fn test_has_structural_patterns_markdown_not_code() {
+        let markdown = "Here is a list:\n\n    - Item one\n    - Item two\n    - Item three\n\nAnd some more text.";
+        assert!(!is_code(markdown), "Markdown with 4-space indented list items should not be classified as code");
     }
 
 }
