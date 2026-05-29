@@ -538,6 +538,30 @@ impl FrameBuilder {
         }
     }
 
+    /// Render a single table row: border, padded cell content, border for each column.
+    fn render_table_row(&mut self, cells: &[String], col_widths: &[usize]) {
+        self.current.push_span('\u{2502}'.to_string(), self.theme.table_border);
+        for (i, &w) in col_widths.iter().enumerate() {
+            let content = cells.get(i).map(|s| s.as_str()).unwrap_or("");
+            let mut cell_buf = String::new();
+            cell_buf.push(' ');
+            let mut used = 0;
+            for c in content.chars() {
+                let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+                if used + cw > w { break; }
+                cell_buf.push(c);
+                used += cw;
+            }
+            for _ in 0..w.saturating_sub(used) {
+                cell_buf.push(' ');
+            }
+            cell_buf.push(' ');
+            self.current.push_span(cell_buf, self.theme.text);
+            self.current.push_span('\u{2502}'.to_string(), self.theme.table_border);
+        }
+        self.finish_line();
+    }
+
     fn blank_line(&mut self) {
         if self.current.width() > 0 {
             self.finish_line();
@@ -589,7 +613,7 @@ impl FrameBuilder {
         // Clamp columns to fit terminal width
         // Total: left_border(1) + per_col(width + 2 padding + separator) + right_border(1)
         //      = 1 + num_cols * (w + 2) + (num_cols - 1) + 1 = num_cols * 3 + sum(widths) + 1
-        let border_overhead = num_cols * 3 + 1;
+        let border_overhead = num_cols.saturating_mul(3).saturating_add(1);
         let total_content: usize = col_widths.iter().sum();
         if border_overhead + total_content > self.width {
             let available = self.width.saturating_sub(border_overhead);
@@ -601,17 +625,30 @@ impl FrameBuilder {
                     if i == num_w - 1 {
                         *w = remaining.max(1);
                     } else {
-                        let share = (*w * available / total_content).max(1).min(remaining);
+                        let share = (w.saturating_mul(available) / total_content).max(1).min(remaining);
                         *w = share;
                         remaining = remaining.saturating_sub(*w);
                     }
                 }
                 // Ensure total width doesn't exceed available (from .max(1) guarantees)
-                let mut total: usize = col_widths.iter().sum();
-                while total > available {
-                    if let Some(max_w) = col_widths.iter_mut().max() {
-                        if *max_w > 1 { *max_w -= 1; total -= 1; } else { break; }
-                    } else { break; }
+                let total: usize = col_widths.iter().sum();
+                if total > available {
+                    let excess = total - available;
+                    let scale = available as f64 / total as f64;
+                    let mut reduced = 0usize;
+                    for w in col_widths.iter_mut() {
+                        let scaled = ((*w as f64 * scale) as usize).max(1);
+                        let cut = (*w).saturating_sub(scaled);
+                        *w = scaled;
+                        reduced += cut;
+                    }
+                    // Distribute any remaining excess
+                    let mut leftover = excess.saturating_sub(reduced);
+                    while leftover > 0 {
+                        if let Some(max_w) = col_widths.iter_mut().max() {
+                            if *max_w > 1 { *max_w -= 1; leftover -= 1; } else { break; }
+                        } else { break; }
+                    }
                 }
             } else {
                 // Not enough space for per-column content — render border-only table
@@ -636,30 +673,6 @@ impl FrameBuilder {
             line
         };
 
-        // Helper to build a cell row
-        let cell_line = |cells: &[String], widths: &[usize]| -> String {
-            let mut line = String::new();
-            line.push('\u{2502}');
-            for (i, &w) in widths.iter().enumerate() {
-                let content = cells.get(i).map(|s| s.as_str()).unwrap_or("");
-                line.push(' ');
-                // Truncate content to fit column width
-                let mut used = 0;
-                for c in content.chars() {
-                    let cw = UnicodeWidthChar::width(c).unwrap_or(0);
-                    if used + cw > w { break; }
-                    line.push(c);
-                    used += cw;
-                }
-                let padding = w.saturating_sub(used);
-                for _ in 0..padding {
-                    line.push(' ');
-                }
-                line.push(' ');
-                line.push('\u{2502}');
-            }
-            line
-        };
 
         // Top border: ┌─┬─┐
         self.finish_line();
@@ -669,27 +682,21 @@ impl FrameBuilder {
         );
         self.finish_line();
 
-        // Header row
-        self.append(
-            &cell_line(&table.header_cells, &col_widths),
-            self.theme.table_border,
-        );
-        self.finish_line();
+        // Header row — border chars get table_border, cell content gets text style
+        self.render_table_row(&table.header_cells, &col_widths);
 
-        // Header separator: ├─┼─┤
-        self.append(
-            &border_line('\u{251C}', '\u{253C}', '\u{2524}', '\u{2500}', &col_widths),
-            self.theme.table_border,
-        );
-        self.finish_line();
-
-        // Data rows
-        for row in &table.rows {
+        // Header separator: ├─┼─┤ (only if there are data rows)
+        if !table.rows.is_empty() {
             self.append(
-                &cell_line(row, &col_widths),
+                &border_line('\u{251C}', '\u{253C}', '\u{2524}', '\u{2500}', &col_widths),
                 self.theme.table_border,
             );
             self.finish_line();
+        }
+
+        // Data rows
+        for row in &table.rows {
+            self.render_table_row(row, &col_widths);
         }
 
         // Bottom border: └─┴─┘

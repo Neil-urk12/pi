@@ -1,5 +1,5 @@
 use rpi_tui::{
-    Color, DefaultTheme, Frame, FrameDiff, FrameLine, MarkdownRenderer, TerminalBackend,
+    Color, DefaultTheme, Frame, FrameDiff, FrameLine, MarkdownRenderer, StyledSpan, TerminalBackend,
     TuiEvent, TurnView,
 };
 use std::thread;
@@ -905,4 +905,102 @@ fn table_no_zero_width_columns() {
             );
         }
     }
+}
+
+#[test]
+fn table_cell_content_has_text_style_not_border_style() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("| A | B |\n| - | - |\n| 1 | 2 |", 80);
+
+    // Collect all spans from rendered table
+    let all_spans: Vec<&StyledSpan> = frame
+        .lines()
+        .iter()
+        .flat_map(|l| l.spans().iter())
+        .collect();
+
+    // Regression: cell content must use text style (Default), not border style (Cyan).
+    // Previously, cell_line built the entire row as one string with a single style.
+
+    // Find a span that contains header cell content "A"
+    let a_span = all_spans
+        .iter()
+        .find(|s| s.text().contains('A'))
+        .expect("span containing 'A' must exist");
+    assert_eq!(
+        a_span.style().foreground,
+        Color::Default,
+        "header cell 'A' should have text style (Default), not border style (Cyan)"
+    );
+
+    // Find a span that contains header cell content "B"
+    let b_span = all_spans
+        .iter()
+        .find(|s| s.text().contains('B'))
+        .expect("span containing 'B' must exist");
+    assert_eq!(
+        b_span.style().foreground,
+        Color::Default,
+        "header cell 'B' should have text style (Default), not border style (Cyan)"
+    );
+
+    // Find a span that contains data cell content "1"
+    let one_span = all_spans
+        .iter()
+        .find(|s| s.text().contains('1'))
+        .expect("span containing '1' must exist");
+    assert_eq!(
+        one_span.style().foreground,
+        Color::Default,
+        "data cell '1' should have text style (Default), not border style (Cyan)"
+    );
+
+    // Find a span that contains data cell content "2"
+    let two_span = all_spans
+        .iter()
+        .find(|s| s.text().contains('2'))
+        .expect("span containing '2' must exist");
+    assert_eq!(
+        two_span.style().foreground,
+        Color::Default,
+        "data cell '2' should have text style (Default), not border style (Cyan)"
+    );
+
+    // Border characters should still have Cyan (table_border style)
+    let border_span = all_spans
+        .iter()
+        .find(|s| s.text().contains('\u{250C}') || s.text().contains('\u{2500}'))
+        .expect("span with border chars must exist");
+    assert_eq!(
+        border_span.style().foreground,
+        Color::Cyan,
+        "border characters should retain table_border style (Cyan)"
+    );
+}
+
+#[test]
+fn table_with_no_data_rows_has_no_header_separator() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    // Header row + separator row in markdown, but NO data rows
+    let frame = renderer.render("| A | B |\n| - | - |", 80);
+    let text = frame.to_plain_text();
+
+    // Top border must be present
+    assert!(
+        text.contains('\u{250C}'),
+        "should have top-left corner (top border), got: {text}"
+    );
+    // Header content must be present
+    assert!(text.contains("A"), "should contain header A, got: {text}");
+    assert!(text.contains("B"), "should contain header B, got: {text}");
+    // Bottom border must be present
+    assert!(
+        text.contains('\u{2514}'),
+        "should have bottom-left corner (bottom border), got: {text}"
+    );
+    // Header separator (left tee) must NOT be present — no data rows to separate from
+    assert!(
+        !text.contains('\u{251C}'),
+        "header separator (left tee) should not appear when there are no data rows, got: {text}"
+    );
 }
