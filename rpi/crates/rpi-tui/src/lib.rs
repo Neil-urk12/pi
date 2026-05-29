@@ -381,9 +381,12 @@ impl FrameBuilder {
 
     fn end_tag(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::BlockQuote(_) | TagEnd::Item => {
+            TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::BlockQuote(_) => {
                 self.pop_style_for(tag);
                 self.blank_line();
+            }
+            TagEnd::Item => {
+                self.pop_style_for(tag);
             }
             TagEnd::CodeBlock => {
                 self.pop_style();
@@ -393,6 +396,7 @@ impl FrameBuilder {
             }
             TagEnd::List(_) => {
                 self.list_stack.pop();
+                self.blank_line();
             }
             TagEnd::TableHead | TagEnd::TableRow => {
                 self.table_cell_started = false;
@@ -454,7 +458,10 @@ impl FrameBuilder {
     }
 
     fn finish_line(&mut self) {
-        self.lines.push(std::mem::take(&mut self.current));
+        let line = std::mem::take(&mut self.current);
+        if !line.spans.is_empty() {
+            self.lines.push(line);
+        }
     }
 
     fn blank_line(&mut self) {
@@ -628,7 +635,9 @@ impl TerminalBackend {
             if index > 0 {
                 output.push('\n');
             }
-            output.push_str("\x1b[2K");
+            if color {
+                output.push_str("\x1b[2K");
+            }
             for span in line.spans() {
                 if color {
                     output.push_str(&ansi_prefix(span.style()));

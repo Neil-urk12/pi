@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rpi_ai::create_provider;
 use rpi_core::*;
 use rpi_tools::ToolRegistry;
-use rpi_tui::{DefaultTheme, Frame, TerminalBackend, TuiEvent, TurnView};
+use rpi_tui::{DefaultTheme, MarkdownRenderer, TerminalBackend};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -104,56 +104,71 @@ impl AgentRunner {
 
     pub async fn run_prompt_tui(&mut self, prompt: &str) -> Result<String> {
         let width = TerminalBackend::terminal_width().unwrap_or(80);
-        let mut view = TurnView::new(DefaultTheme::default(), width);
-        let mut previous_frame = Frame::default();
-        let mut tool_summaries: HashMap<String, (String, Option<String>)> = HashMap::new();
+        let theme = DefaultTheme::default();
         let color = TerminalBackend::should_color();
+        let renderer = MarkdownRenderer::new(theme);
+        let mut accumulated = String::new();
+        let mut tool_summaries: HashMap<String, (String, Option<String>)> = HashMap::new();
 
         self.run_prompt_with_observer(prompt, |event| {
-            let tui_event = match event {
-                AgentEvent::TextDelta { text } => Some(TuiEvent::AssistantDelta(text.clone())),
+            match event {
+                AgentEvent::TextDelta { text } => {
+                    accumulated.push_str(text);
+                }
                 AgentEvent::ToolExecutionStart {
                     id,
                     name,
                     arguments,
+                    ..
                 } => {
                     let summary = safe_tool_summary(name, arguments);
                     tool_summaries.insert(id.clone(), (name.clone(), summary.clone()));
-                    Some(TuiEvent::ToolStarted {
-                        name: name.clone(),
-                        summary,
-                    })
+                    let line = format_tool_line("Running", name, summary.as_deref());
+                    if color {
+                        eprint!("\r\x1b[2K\x1b[35m{line}\x1b[0m\n");
+                    } else {
+                        eprint!("{line}\n");
+                    }
                 }
                 AgentEvent::ToolExecutionEnd {
                     id, name, is_error, ..
                 } => {
-                    let summary = tool_summaries.remove(id).and_then(|(_, summary)| summary);
-                    Some(TuiEvent::ToolFinished {
-                        name: name.clone(),
-                        summary,
-                        is_error: *is_error,
-                    })
+                    let summary = tool_summaries.remove(id).and_then(|(_, s)| s);
+                    let status = if *is_error { "Tool error" } else { "Finished" };
+                    let line = format_tool_line(status, name, summary.as_deref());
+                    if color {
+                        eprint!("\r\x1b[2K\x1b[35m{line}\x1b[0m\n");
+                    } else {
+                        eprint!("{line}\n");
+                    }
                 }
-                AgentEvent::TurnEnd { .. } | AgentEvent::Done { .. } => {
-                    Some(TuiEvent::TurnFinished)
+                AgentEvent::TurnEnd { .. } => {
+                    // Don't render yet — wait for Done
                 }
-                AgentEvent::Error { error } => Some(TuiEvent::RendererWarning(error.clone())),
-                _ => None,
-            };
-
-            if let Some(tui_event) = tui_event {
-                let decision = view.apply_event(tui_event);
-                if decision.should_render {
-                    let next_frame = view.render_frame();
-                    let encoded = TerminalBackend::encode_active_region_update(
-                        &previous_frame,
-                        &next_frame,
-                        color,
-                    );
-                    print!("{encoded}");
-                    let _ = io::stdout().flush();
-                    previous_frame = next_frame;
+                AgentEvent::Done { .. } => {
+                    // Render styled markdown
+                    if !accumulated.is_empty() {
+                        let frame = renderer.render(&accumulated, width);
+                        let encoded = TerminalBackend::encode_frame(&frame, color);
+                        print!("{encoded}\n");
+                        let _ = io::stdout().flush();
+                    }
                 }
+                AgentEvent::Error { error } => {
+                    // Render any partial output before showing the error
+                    if !accumulated.is_empty() {
+                        let frame = renderer.render(&accumulated, width);
+                        let encoded = TerminalBackend::encode_frame(&frame, color);
+                        print!("{encoded}\n");
+                        let _ = io::stdout().flush();
+                    }
+                    if color {
+                        eprintln!("\x1b[31mError: {error}\x1b[0m");
+                    } else {
+                        eprintln!("Error: {error}");
+                    }
+                }
+                _ => {}
             }
         })
         .await
@@ -393,6 +408,13 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         output.push(ch);
     }
     output
+}
+
+fn format_tool_line(status: &str, name: &str, summary: Option<&str>) -> String {
+    match summary {
+        Some(s) if !s.is_empty() => format!("{status} {name}: {s}"),
+        _ => format!("{status} {name}"),
+    }
 }
 
 #[cfg(test)]
