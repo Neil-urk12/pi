@@ -209,8 +209,8 @@ pub async fn run_agent_loop(
                         }
                     }
 
-                    if let Some(FinishReason::ContentFilter) = last_finish_reason {
-                        return Err(PiError::Provider("Content filtered by model".to_string()));
+                    if let Some(error) = finish_reason_error(&last_finish_reason) {
+                        return Err(error);
                     }
 
                     let mut content_blocks = Vec::new();
@@ -291,6 +291,10 @@ pub async fn run_agent_loop(
                 .await
             {
                 Ok(response) => {
+                    if let Some(error) = finish_reason_error(&Some(response.finish_reason.clone()))
+                    {
+                        return Err(error);
+                    }
                     total_usage.prompt_tokens = total_usage.prompt_tokens.saturating_add(response.usage.prompt_tokens);
                     total_usage.completion_tokens = total_usage.completion_tokens.saturating_add(response.usage.completion_tokens);
                     total_usage.total_tokens = total_usage.total_tokens.saturating_add(response.usage.total_tokens);
@@ -451,6 +455,18 @@ pub async fn run_agent_loop(
                 .await;
             }
         }
+    }
+}
+
+fn finish_reason_error(reason: &Option<FinishReason>) -> Option<PiError> {
+    match reason {
+        Some(FinishReason::Length) => Some(PiError::Provider(
+            "Response hit max tokens before completion".to_string(),
+        )),
+        Some(FinishReason::ContentFilter) => {
+            Some(PiError::Provider("Content filtered by model".to_string()))
+        }
+        _ => None,
     }
 }
 
@@ -1227,6 +1243,184 @@ mod tests {
             result.is_err(),
             "Agent loop should return error when finish_reason is ContentFilter, \
              but it completed Ok. finish_reason is silently discarded."
+        );
+    }
+
+    #[test]
+    fn test_streaming_length_finish_reason_returns_error() {
+        struct LengthProvider;
+
+        #[async_trait]
+        impl Provider for LengthProvider {
+            fn id(&self) -> &str {
+                "length"
+            }
+
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatResponse> {
+                panic!("chat should not be called in streaming mode")
+            }
+
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatStream> {
+                let stream = futures::stream::iter(vec![Ok(StreamChunk {
+                    delta: Some("Partial".to_string()),
+                    tool_calls: vec![],
+                    finish_reason: Some(FinishReason::Length),
+                    usage: None,
+                })]);
+                Ok(Box::pin(stream))
+            }
+        }
+
+        let provider = LengthProvider;
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("Hi".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        let config = AgentLoopConfig {
+            max_tool_rounds: 1,
+            stream: true,
+            compaction: None,
+        };
+        let agent_config = AgentConfig {
+            model: ModelId::new("mock", "mock-model"),
+            max_tokens: Some(1000),
+            temperature: Some(0.7),
+            system_prompt: None,
+            max_iterations: 10,
+        };
+
+        let mut events = Vec::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(run_agent_loop(
+            &provider,
+            "mock-model",
+            &mut messages,
+            &[],
+            &config,
+            &agent_config,
+            |event| events.push(event),
+        ));
+
+        assert!(
+            matches!(
+                &result,
+                Err(PiError::Provider(message))
+                    if message == "Response hit max tokens before completion"
+            ),
+            "Agent loop should reject truncated streaming responses, got: {result:?}"
+        );
+        assert_eq!(
+            messages.len(),
+            1,
+            "Partial assistant message must not be saved"
+        );
+    }
+
+    #[test]
+    fn test_non_streaming_length_finish_reason_returns_error() {
+        struct LengthProvider;
+
+        #[async_trait]
+        impl Provider for LengthProvider {
+            fn id(&self) -> &str {
+                "length"
+            }
+
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: Some(MessageContent::Text("Partial".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    finish_reason: FinishReason::Length,
+                    usage: Usage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                    },
+                })
+            }
+
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatStream> {
+                panic!("chat_stream should not be called in non-streaming mode")
+            }
+        }
+
+        let provider = LengthProvider;
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("Hi".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        let config = AgentLoopConfig {
+            max_tool_rounds: 1,
+            stream: false,
+            compaction: None,
+        };
+        let agent_config = AgentConfig {
+            model: ModelId::new("mock", "mock-model"),
+            max_tokens: Some(1000),
+            temperature: Some(0.7),
+            system_prompt: None,
+            max_iterations: 10,
+        };
+
+        let mut events = Vec::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(run_agent_loop(
+            &provider,
+            "mock-model",
+            &mut messages,
+            &[],
+            &config,
+            &agent_config,
+            |event| events.push(event),
+        ));
+
+        assert!(
+            matches!(
+                &result,
+                Err(PiError::Provider(message))
+                    if message == "Response hit max tokens before completion"
+            ),
+            "Agent loop should reject truncated non-streaming responses, got: {result:?}"
+        );
+        assert_eq!(
+            messages.len(),
+            1,
+            "Partial assistant message must not be saved"
         );
     }
 
