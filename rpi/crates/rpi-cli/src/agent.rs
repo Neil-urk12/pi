@@ -248,9 +248,15 @@ impl AgentRunner {
                         if i == 0 {
                             cumulative_first_kept = result.first_kept_message_index;
                         } else {
-                            cumulative_first_kept += result.first_kept_message_index.checked_sub(1)
+                            cumulative_first_kept = cumulative_first_kept
+                                .checked_add(
+                                    result.first_kept_message_index.checked_sub(1)
+                                        .ok_or_else(|| anyhow::anyhow!(
+                                            "first_kept_message_index is 0 for compaction {i}"
+                                        ))?
+                                )
                                 .ok_or_else(|| anyhow::anyhow!(
-                                    "first_kept_message_index is 0 for compaction {i}"
+                                    "cumulative_first_kept overflow at compaction {i}"
                                 ))?;
                         }
 
