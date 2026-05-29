@@ -239,16 +239,28 @@ impl MarkdownRenderer {
     }
 }
 
+#[derive(Debug)]
+struct TableState {
+    header_cells: Vec<String>,
+    rows: Vec<Vec<String>>,
+    current_row: Vec<String>,
+    current_cell: String,
+    in_header: bool,
+}
+
 struct FrameBuilder {
     width: usize,
     theme: DefaultTheme,
     lines: Vec<FrameLine>,
     current: FrameLine,
+    in_code_block: bool,
+    at_line_start_in_code: bool,
+    code_block_has_content: bool,
     style: Style,
     style_stack: Vec<Style>,
     list_stack: Vec<ListState>,
     link_stack: Vec<String>,
-    table_cell_started: bool,
+    table_state: Option<TableState>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,7 +281,10 @@ impl FrameBuilder {
             style_stack: Vec::new(),
             list_stack: Vec::new(),
             link_stack: Vec::new(),
-            table_cell_started: false,
+            table_state: None,
+            in_code_block: false,
+            at_line_start_in_code: false,
+            code_block_has_content: false,
         }
     }
 
@@ -278,11 +293,23 @@ impl FrameBuilder {
             match event {
                 Event::Start(tag) => self.start_tag(tag),
                 Event::End(tag) => self.end_tag(tag),
-                Event::Text(text) => self.append(text.as_ref(), self.style),
+                Event::Text(text) => {
+                    if let Some(ts) = &mut self.table_state {
+                        ts.current_cell.push_str(text.as_ref());
+                    } else {
+                        self.append(text.as_ref(), self.style);
+                    }
+                }
                 Event::Code(code) => {
-                    self.append("`", self.theme.code);
-                    self.append(code.as_ref(), self.theme.code);
-                    self.append("`", self.theme.code);
+                    if let Some(ts) = &mut self.table_state {
+                        ts.current_cell.push('`');
+                        ts.current_cell.push_str(code.as_ref());
+                        ts.current_cell.push('`');
+                    } else {
+                        self.append("`", self.theme.code);
+                        self.append(code.as_ref(), self.theme.code);
+                        self.append("`", self.theme.code);
+                    }
                 }
                 Event::SoftBreak | Event::HardBreak => self.finish_line(),
                 Event::Rule => {
@@ -306,10 +333,12 @@ impl FrameBuilder {
             Tag::Paragraph => {}
             Tag::Heading { level, .. } => {
                 self.finish_line();
-                self.append(
-                    &format!("{} ", "#".repeat(level as usize)),
-                    self.theme.heading,
-                );
+                if level as usize >= 3 {
+                    self.append(
+                        &format!("{} ", "#".repeat(level as usize)),
+                        self.theme.heading,
+                    );
+                }
                 self.push_style(self.theme.heading);
             }
             Tag::BlockQuote(_) => {
@@ -322,6 +351,9 @@ impl FrameBuilder {
                 self.append("```", self.theme.code);
                 self.finish_line();
                 self.push_style(self.theme.code);
+                self.in_code_block = true;
+                self.at_line_start_in_code = true;
+                self.code_block_has_content = false;
             }
             Tag::List(start) => {
                 self.list_stack.push(ListState {
@@ -344,14 +376,26 @@ impl FrameBuilder {
                 };
                 self.append(&marker, self.theme.list_marker);
             }
-            Tag::Table(_) | Tag::TableHead | Tag::TableRow => {
-                self.finish_line();
+            Tag::Table(_alignments) => {
+                self.table_state = Some(TableState {
+                    header_cells: Vec::new(),
+                    rows: Vec::new(),
+                    current_row: Vec::new(),
+                    current_cell: String::new(),
+                    in_header: true,
+                });
+            }
+            Tag::TableHead => {}
+            Tag::TableRow => {
+                if let Some(ts) = &mut self.table_state {
+                    ts.current_row = Vec::new();
+                    ts.in_header = false;
+                }
             }
             Tag::TableCell => {
-                if self.table_cell_started {
-                    self.append(" | ", self.theme.table_border);
+                if let Some(ts) = &mut self.table_state {
+                    ts.current_cell = String::new();
                 }
-                self.table_cell_started = true;
             }
             Tag::Emphasis => self.push_style(Style {
                 italic: true,
@@ -389,6 +433,8 @@ impl FrameBuilder {
                 self.pop_style_for(tag);
             }
             TagEnd::CodeBlock => {
+                self.in_code_block = false;
+                self.at_line_start_in_code = false;
                 self.pop_style();
                 self.finish_line();
                 self.append("```", self.theme.code);
@@ -398,15 +444,29 @@ impl FrameBuilder {
                 self.list_stack.pop();
                 self.blank_line();
             }
-            TagEnd::TableHead | TagEnd::TableRow => {
-                self.table_cell_started = false;
-                self.finish_line();
+            TagEnd::TableCell => {
+                if let Some(ts) = &mut self.table_state {
+                    let cell = std::mem::take(&mut ts.current_cell);
+                    if ts.in_header {
+                        ts.header_cells.push(cell);
+                    } else {
+                        ts.current_row.push(cell);
+                    }
+                }
+            }
+            TagEnd::TableHead => {}
+            TagEnd::TableRow => {
+                if let Some(ts) = &mut self.table_state {
+                    let row = std::mem::take(&mut ts.current_row);
+                    ts.rows.push(row);
+                }
             }
             TagEnd::Table => {
-                self.table_cell_started = false;
-                self.blank_line();
+                if let Some(table) = self.table_state.take() {
+                    self.finish_line();
+                    self.render_table(table);
+                }
             }
-            TagEnd::TableCell => {}
             TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => self.pop_style(),
             TagEnd::Link => {
                 self.pop_style();
@@ -448,19 +508,33 @@ impl FrameBuilder {
                 continue;
             }
 
+            // Push "  " prefix before first visible char on each code block line
+            if self.at_line_start_in_code {
+                self.at_line_start_in_code = false;
+                if self.width >= 4 {
+                    self.current.push_span("  ".to_string(), self.style);
+                }
+            }
+
             let ch_width = ch.width().unwrap_or(0);
             if self.current.width() > 0 && self.current.width() + ch_width > self.width {
                 self.finish_line();
             }
 
             self.current.push_span(ch.to_string(), style);
+            if self.in_code_block && !ch.is_whitespace() {
+                self.code_block_has_content = true;
+            }
         }
     }
 
     fn finish_line(&mut self) {
         let line = std::mem::take(&mut self.current);
-        if !line.spans.is_empty() {
+        if !line.spans.is_empty() || (self.in_code_block && self.code_block_has_content) {
             self.lines.push(line);
+        }
+        if self.in_code_block {
+            self.at_line_start_in_code = true;
         }
     }
 
@@ -483,6 +557,147 @@ impl FrameBuilder {
         }
 
         Frame::new(self.lines)
+    }
+
+    fn render_table(&mut self, table: TableState) {
+        let num_cols = table.header_cells.len().max(1);
+
+        // Terminal too narrow for even border structure — skip rendering
+        let min_table_width = num_cols * 3 + 1;
+        if self.width < min_table_width {
+            return;
+        }
+
+        // Calculate column widths
+        let mut col_widths = vec![0usize; num_cols];
+        for (i, cell) in table.header_cells.iter().enumerate() {
+            col_widths[i] = col_widths[i].max(UnicodeWidthStr::width(cell.as_str()));
+        }
+        for row in &table.rows {
+            for (i, cell) in row.iter().enumerate() {
+                if i < num_cols {
+                    col_widths[i] = col_widths[i].max(UnicodeWidthStr::width(cell.as_str()));
+                }
+            }
+        }
+
+        // Ensure minimum width of 1
+        for w in &mut col_widths {
+            *w = (*w).max(1);
+        }
+
+        // Clamp columns to fit terminal width
+        // Total: left_border(1) + per_col(width + 2 padding + separator) + right_border(1)
+        //      = 1 + num_cols * (w + 2) + (num_cols - 1) + 1 = num_cols * 3 + sum(widths) + 1
+        let border_overhead = num_cols * 3 + 1;
+        let total_content: usize = col_widths.iter().sum();
+        if border_overhead + total_content > self.width {
+            let available = self.width.saturating_sub(border_overhead);
+            if available >= num_cols && total_content > 0 {
+                // Distribute available width proportionally to content needs
+                let mut remaining = available;
+                let num_w = col_widths.len();
+                for (i, w) in col_widths.iter_mut().enumerate() {
+                    if i == num_w - 1 {
+                        *w = remaining.max(1);
+                    } else {
+                        let share = (*w * available / total_content).max(1).min(remaining);
+                        *w = share;
+                        remaining = remaining.saturating_sub(*w);
+                    }
+                }
+                // Ensure total width doesn't exceed available (from .max(1) guarantees)
+                let mut total: usize = col_widths.iter().sum();
+                while total > available {
+                    if let Some(max_w) = col_widths.iter_mut().max() {
+                        if *max_w > 1 { *max_w -= 1; total -= 1; } else { break; }
+                    } else { break; }
+                }
+            } else {
+                // Not enough space for per-column content — render border-only table
+                col_widths.fill(0);
+            }
+        }
+
+        // Helper to build a border line
+        let border_line = |left: char, mid: char, right: char, fill: char, widths: &[usize]| -> String {
+            let mut line = String::new();
+            line.push(left);
+            for (i, &w) in widths.iter().enumerate() {
+                for _ in 0..w + 2 {
+                    line.push(fill);
+                }
+                if i < widths.len() - 1 {
+                    line.push(mid);
+                } else {
+                    line.push(right);
+                }
+            }
+            line
+        };
+
+        // Helper to build a cell row
+        let cell_line = |cells: &[String], widths: &[usize]| -> String {
+            let mut line = String::new();
+            line.push('\u{2502}');
+            for (i, &w) in widths.iter().enumerate() {
+                let content = cells.get(i).map(|s| s.as_str()).unwrap_or("");
+                line.push(' ');
+                // Truncate content to fit column width
+                let mut used = 0;
+                for c in content.chars() {
+                    let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+                    if used + cw > w { break; }
+                    line.push(c);
+                    used += cw;
+                }
+                let padding = w.saturating_sub(used);
+                for _ in 0..padding {
+                    line.push(' ');
+                }
+                line.push(' ');
+                line.push('\u{2502}');
+            }
+            line
+        };
+
+        // Top border: ┌─┬─┐
+        self.finish_line();
+        self.append(
+            &border_line('\u{250C}', '\u{252C}', '\u{2510}', '\u{2500}', &col_widths),
+            self.theme.table_border,
+        );
+        self.finish_line();
+
+        // Header row
+        self.append(
+            &cell_line(&table.header_cells, &col_widths),
+            self.theme.table_border,
+        );
+        self.finish_line();
+
+        // Header separator: ├─┼─┤
+        self.append(
+            &border_line('\u{251C}', '\u{253C}', '\u{2524}', '\u{2500}', &col_widths),
+            self.theme.table_border,
+        );
+        self.finish_line();
+
+        // Data rows
+        for row in &table.rows {
+            self.append(
+                &cell_line(row, &col_widths),
+                self.theme.table_border,
+            );
+            self.finish_line();
+        }
+
+        // Bottom border: └─┴─┘
+        self.append(
+            &border_line('\u{2514}', '\u{2534}', '\u{2518}', '\u{2500}', &col_widths),
+            self.theme.table_border,
+        );
+        self.finish_line();
     }
 }
 

@@ -1,9 +1,10 @@
 use rpi_tui::{
-    DefaultTheme, Frame, FrameDiff, FrameLine, MarkdownRenderer, TerminalBackend, TuiEvent,
-    TurnView,
+    Color, DefaultTheme, Frame, FrameDiff, FrameLine, MarkdownRenderer, TerminalBackend,
+    TuiEvent, TurnView,
 };
 use std::thread;
 use std::time::Duration;
+use unicode_width::UnicodeWidthStr;
 
 #[test]
 fn markdown_renderer_formats_core_markdown_surface() {
@@ -14,12 +15,12 @@ fn markdown_renderer_formats_core_markdown_surface() {
         40,
     );
 
-    assert!(frame.to_plain_text().contains("# Heading"));
+    assert!(frame.to_plain_text().contains("Heading"));
     assert!(frame.to_plain_text().contains("bold"));
     assert!(frame.to_plain_text().contains("`code`"));
     assert!(frame.to_plain_text().contains("[x] task"));
     assert!(frame.to_plain_text().contains("> quote"));
-    assert!(frame.to_plain_text().contains("A | B"));
+    assert!(frame.to_plain_text().contains("│"));
 }
 
 #[test]
@@ -302,7 +303,7 @@ fn heading_spacing_has_no_leading_blank_line() {
     );
     assert_eq!(
         lines[0].to_plain_text(),
-        "# Title",
+        "Title",
         "first line should be the heading"
     );
 }
@@ -313,7 +314,7 @@ fn heading_to_list_has_single_blank_separator() {
     // Find the heading line.
     let heading_idx = lines
         .iter()
-        .position(|l: &FrameLine| l.to_plain_text() == "# Title")
+        .position(|l: &FrameLine| l.to_plain_text() == "Title")
         .expect("heading line must exist");
 
     // The line immediately after the heading should be blank (separator).
@@ -359,7 +360,7 @@ fn code_block_has_no_inner_blank_before_closing_fence() {
     // The line after the opening fence is the code content.
     assert_eq!(
         lines[opening_idx + 1].to_plain_text(),
-        "fn main() {}",
+        "  fn main() {}",
         "code content should follow opening fence"
     );
     // The line after code content should be the closing fence — NOT a blank.
@@ -408,24 +409,24 @@ fn full_document_layout_snapshot() {
     let lines = frame.lines();
 
     // Expected layout (10 lines):
-    //   0  "# Title"
+    //   0  "Title"
     //   1  ""
     //   2  "- item one"
     //   3  "- item two"
     //   4  ""
     //   5  "```"
-    //   6  "fn main() {}"
+    //   6  "  fn main() {}"
     //   7  "```"
     //   8  ""
     //   9  "A paragraph."
     let expected: &[&str] = &[
-        "# Title",
+        "Title",
         "",
         "- item one",
         "- item two",
         "",
         "```",
-        "fn main() {}",
+        "  fn main() {}",
         "```",
         "",
         "A paragraph.",
@@ -534,4 +535,374 @@ fn empty_code_block_produces_no_inner_blank() {
         vec!["```", "```"],
         "empty code block should produce just fences, got: {texts:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests for renderer improvements: heading stripping, code indent, table box-drawing.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn h1_heading_strips_hash_prefix() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("# Hello", 80);
+    let text = frame.to_plain_text();
+    assert_eq!(text, "Hello", "h1 should strip '# ' prefix");
+}
+
+#[test]
+fn h2_heading_strips_hash_prefix() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("## Python", 80);
+    let text = frame.to_plain_text();
+    assert_eq!(text, "Python", "h2 should strip '## ' prefix");
+}
+
+#[test]
+fn h3_heading_keeps_hash_prefix() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("### Details", 80);
+    let text = frame.to_plain_text();
+    assert_eq!(text, "### Details", "h3+ should keep '### ' prefix");
+}
+
+#[test]
+fn code_block_content_is_indented() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("```\nfn main() {}\n```", 80);
+    let lines = frame.lines();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0].to_plain_text(), "```");
+    assert_eq!(
+        lines[1].to_plain_text(),
+        "  fn main() {}",
+        "code content should be indented with 2 spaces"
+    );
+    assert_eq!(lines[2].to_plain_text(), "```");
+}
+
+#[test]
+fn code_block_indent_respects_width() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("```\nabcdefghijklmnopqrstuvwxyz\n```", 20);
+    let lines = frame.lines();
+    for line in lines {
+        assert!(
+            line.width() <= 20,
+            "line width {} exceeds 20: {:?}",
+            line.width(),
+            line.to_plain_text()
+        );
+    }
+    assert!(
+        lines[1].to_plain_text().starts_with("  "),
+        "code should start with indent"
+    );
+}
+
+#[test]
+fn table_renders_box_drawing() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("| A | B |\n| - | - |\n| 1 | 2 |", 80);
+    let text = frame.to_plain_text();
+    assert!(text.contains('\u{250C}'), "should have top-left corner, got: {text}");
+    assert!(text.contains('\u{2510}'), "should have top-right corner");
+    assert!(text.contains('\u{2514}'), "should have bottom-left corner");
+    assert!(text.contains('\u{2518}'), "should have bottom-right corner");
+    assert!(text.contains('\u{2502}'), "should have vertical borders");
+    assert!(text.contains('\u{2500}'), "should have horizontal borders");
+    assert!(text.contains('\u{252C}'), "should have top tee");
+    assert!(text.contains('\u{2534}'), "should have bottom tee");
+    assert!(text.contains('\u{253C}'), "should have cross");
+    assert!(text.contains('\u{251C}'), "should have left tee");
+    assert!(text.contains('\u{2524}'), "should have right tee");
+}
+
+#[test]
+fn table_contains_cell_content() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("| A | B |\n| - | - |\n| 1 | 2 |", 80);
+    let text = frame.to_plain_text();
+    assert!(text.contains("A"), "should contain header A");
+    assert!(text.contains("B"), "should contain header B");
+    assert!(text.contains("1"), "should contain data 1");
+    assert!(text.contains("2"), "should contain data 2");
+}
+
+#[test]
+fn table_lines_fit_within_width() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame =
+        renderer.render("| Name | Value |\n| ---- | ----- |\n| hello | world |", 40);
+    for line in frame.lines() {
+        assert!(
+            line.width() <= 40,
+            "line width {} exceeds 40: {:?}",
+            line.width(),
+            line.to_plain_text()
+        );
+    }
+}
+
+#[test]
+fn table_cjk_columns_aligned() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("| 名前 | 値 |\n| -- | -- |\n| 田中太郎 | 123 |", 80);
+    let lines: Vec<String> = frame.lines().iter().map(|l| l.to_plain_text()).collect();
+    // All table lines should have identical display width
+    // CJK chars are 3 bytes but 2 display columns; String::len() will be wrong
+    let widths: Vec<usize> = lines
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
+        .collect();
+    let first = widths[0];
+    for (i, &w) in widths.iter().enumerate() {
+        assert_eq!(
+            w, first,
+            "CJK table columns misaligned: line {i} display width {w} != {first}"
+        );
+    }
+}
+
+#[test]
+fn table_clamps_to_terminal_width() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    // Table with content wider than 30 columns
+    let frame = renderer.render(
+        "| Name | Value | Description |\n| ---- | ----- | ----------- |\n| alpha | 1 | this is a very long description |",
+        30,
+    );
+    let lines: Vec<String> = frame.lines().iter().map(|l| l.to_plain_text()).collect();
+    // All lines must fit within terminal width
+    for (i, line) in lines.iter().enumerate() {
+        let w = UnicodeWidthStr::width(line.as_str());
+        assert!(
+            w <= 30,
+            "table line {i} width {w} exceeds terminal width 30: {line:?}"
+        );
+    }
+    // Table structure must be preserved: each row has matching │ vertical borders
+    // A 3-column table should have exactly 4 │ per data/border row (left + 3 interior + right)
+    for (i, line) in lines.iter().enumerate() {
+        let pipe_count = line.chars().filter(|&c| c == '\u{2502}').count();
+        // Border lines (┌─┬─┐ etc.) use different chars but should have consistent structure
+        if pipe_count > 0 {
+            assert_eq!(
+                pipe_count, 4,
+                "table line {i} should have 4 vertical borders, got {pipe_count}: {line:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn code_block_indent_multiline_content() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("```rust\nfn main() {\n    println!(\"hello\");\n}\n```", 80);
+    let lines: Vec<String> = frame.lines().iter().map(|l| l.to_plain_text()).collect();
+    
+    // Expected: opening fence, 3 indented lines, closing fence
+    assert_eq!(lines.len(), 5, "expected 5 lines, got {}: {lines:?}", lines.len());
+    assert_eq!(lines[0], "```");
+    assert_eq!(lines[1], "  fn main() {", "line 1 should be indented");
+    assert_eq!(lines[2], "      println!(\"hello\");", "line 2 should be indented (original 4 spaces + 2 prefix)");
+    assert_eq!(lines[3], "  }", "line 3 should be indented");
+    assert_eq!(lines[4], "```");
+}
+
+#[test]
+fn full_layout_with_multiline_code_block() {
+    let md = "# Title\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nParagraph.";
+    let frame = MarkdownRenderer::new(DefaultTheme::default()).render(md, 80);
+    let lines: Vec<String> = frame.lines().iter().map(|l| l.to_plain_text()).collect();
+    
+    // Expected layout (9 lines):
+    //   0  "Title"
+    //   1  ""
+    //   2  "```"
+    //   3  "  fn main() {"
+    //   4  "      println!(\"hi\");"
+    //   5  "  }"
+    //   6  "```"
+    //   7  ""
+    //   8  "Paragraph."
+    let expected: &[&str] = &[
+        "Title",
+        "",
+        "```",
+        "  fn main() {",
+        "      println!(\"hi\");",
+        "  }",
+        "```",
+        "",
+        "Paragraph.",
+    ];
+    
+    assert_eq!(lines.len(), expected.len(), "line count mismatch:\nactual: {lines:#?}");
+    for (i, (actual, &exp)) in lines.iter().zip(expected.iter()).enumerate() {
+        assert_eq!(actual, exp, "line {i} mismatch");
+    }
+}
+
+
+#[test]
+fn code_block_preserves_blank_line_between_functions() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("```rust\nfn a() {}\n\nfn b() {}\n```", 80);
+    let lines: Vec<String> = frame.lines().iter().map(|l| l.to_plain_text()).collect();
+    
+    // Expected: ``` / "  fn a() {}" / "" / "  fn b() {}" / ```
+    assert_eq!(lines.len(), 5, "expected 5 lines, got {}: {lines:?}", lines.len());
+    assert_eq!(lines[0], "```");
+    assert_eq!(lines[1], "  fn a() {}");
+    assert_eq!(lines[2], "", "blank line in code block should be preserved");
+    assert_eq!(lines[3], "  fn b() {}");
+    assert_eq!(lines[4], "```");
+}
+
+#[test]
+fn code_block_in_narrow_terminal_does_not_panic() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    // width=3: "  " prefix (2) + 1 char fits, but barely
+    let frame = renderer.render("```\nabc\n```", 3);
+    let text = frame.to_plain_text();
+    assert!(text.contains("abc"), "code content must survive narrow terminal, got: {text}");
+}
+
+#[test]
+fn heading_text_has_heading_style() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("# Hello", 80);
+
+    let lines = frame.lines();
+    let hello_span = lines
+        .iter()
+        .flat_map(|l| l.spans().iter())
+        .find(|s| s.text().contains("Hello"))
+        .expect("span with 'Hello' must exist");
+
+    let style = hello_span.style();
+    assert_eq!(style.foreground, Color::Cyan, "heading foreground should be Cyan");
+    assert!(style.bold, "heading should be bold");
+    assert!(style.underline, "heading should be underline");
+}
+
+#[test]
+fn h2_text_has_heading_style() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("## World", 80);
+
+    let lines = frame.lines();
+    let world_span = lines
+        .iter()
+        .flat_map(|l| l.spans().iter())
+        .find(|s| s.text().contains("World"))
+        .expect("span with 'World' must exist");
+
+    let style = world_span.style();
+    assert_eq!(style.foreground, Color::Cyan, "heading foreground should be Cyan");
+    assert!(style.bold, "heading should be bold");
+    assert!(style.underline, "heading should be underline");
+}
+
+#[test]
+fn heading_inside_blockquote_preserves_quote_style_after() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    let frame = renderer.render("> # Title\n> text after heading", 80);
+
+    let lines = frame.lines();
+    let after_span = lines
+        .iter()
+        .flat_map(|l| l.spans().iter())
+        .find(|s| s.text().contains("text after heading"))
+        .expect("span with 'text after heading' must exist");
+
+    let style = after_span.style();
+    assert_eq!(
+        style.foreground,
+        Color::Blue,
+        "text after heading inside blockquote should have quote foreground (Blue)"
+    );
+    assert!(
+        style.italic,
+        "text after heading inside blockquote should be italic (quote style)"
+    );
+    assert!(
+        !style.bold,
+        "text after heading should not retain heading bold style"
+    );
+}
+
+#[test]
+fn table_width_never_exceeds_terminal_for_many_wide_columns() {
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    // 6 wide columns on a 25-char terminal — stress test for proportional clamping
+    let md = "| Col1 | Col2 | Col3 | Col4 | Col5 | Col6 |
+| ---- | ---- | ---- | ---- | ---- | ---- |
+| aaa | bbb | ccc | ddd | eee | fff |";
+    let frame = renderer.render(md, 25);
+    for (i, line) in frame.lines().iter().enumerate() {
+        let w = UnicodeWidthStr::width(line.to_plain_text().as_str());
+        assert!(
+            w <= 25,
+            "line {i} display width {w} exceeds 25: {:?}",
+            line.to_plain_text()
+        );
+    }
+    // Verify table structure preserved: data rows must have 7 │ chars (6 cols + borders)
+    let texts: Vec<String> = frame.lines().iter().map(|l| l.to_plain_text()).collect();
+    for (i, text) in texts.iter().enumerate() {
+        let pipe_count = text.chars().filter(|&c| c == '\u{2502}').count();
+        if pipe_count > 0 {
+            assert_eq!(
+                pipe_count, 7,
+                "line {i} should have 7 vertical borders for 6-column table, got {pipe_count}: {text:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn table_no_zero_width_columns() {
+    // Regression: when available < num_cols - 1, last column could get width=0,
+    // truncating cell content.
+    let renderer = MarkdownRenderer::new(DefaultTheme::default());
+    // 5 columns, terminal width 40
+    // border_overhead = 5*3 + 1 = 16, available = 24
+    // First col has wide content forcing proportional clamping
+    let md = "| verylongcontentthatexceedswidth | a | b | c | d |\n| --- | --- | --- | --- | --- |\n| z | z | z | z | z |";
+    let frame = renderer.render(md, 40);
+    let lines: Vec<String> = frame.lines().iter().map(|l| l.to_plain_text()).collect();
+
+    // All lines must fit within terminal width
+    for (i, line) in lines.iter().enumerate() {
+        let w = unicode_width::UnicodeWidthStr::width(line.as_str());
+        assert!(
+            w <= 40,
+            "line {i} width {w} exceeds 40: {line:?}"
+        );
+    }
+
+    // Find data row (contains 'z') and verify all 5 cells render their content.
+    // With zero-width last column, the 'z' in column 5 would be truncated.
+    let data_line = lines
+        .iter()
+        .find(|l| l.contains('z'))
+        .expect("should have a data row");
+    let parts: Vec<&str> = data_line.split('\u{2502}').collect();
+    // split on │: ["", " content ", " content ", ..., ""] for 5 columns = 7 parts
+    assert_eq!(
+        parts.len(), 7,
+        "data row should split into 7 parts (5 cells + 2 edges), got {}: {data_line:?}",
+        parts.len()
+    );
+    // Every cell should contain its expected content, not just whitespace.
+    // A zero-width column truncates content, leaving only padding spaces.
+    for (j, part) in parts.iter().enumerate() {
+        if j > 0 && j < parts.len() - 1 {
+            assert!(
+                part.contains('z'),
+                "data cell {j} should contain 'z', got {part:?} — column likely has zero width"
+            );
+        }
+    }
 }
