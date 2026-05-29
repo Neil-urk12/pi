@@ -50,10 +50,41 @@ pub fn create_provider(config: &ProviderConfig) -> anyhow::Result<Box<dyn rpi_co
                 None,
             )))
         }
+        ProviderConfig::Gitlawb { api_key, base_url } => {
+            let url = base_url
+                .as_deref()
+                .unwrap_or("https://opengateway.gitlawb.com");
+            Ok(Box::new(OpenAiProvider::with_base_url(url, Some(api_key))))
+        }
     }
 }
 
 /// Return a list of all supported provider identifiers.
 pub fn supported_providers() -> &'static [&'static str] {
-    &["openai", "anthropic", "ollama"]
+    &["openai", "anthropic", "ollama", "gitlawb"]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gitlawb_default_base_url() {
+        let config = ProviderConfig::Gitlawb {
+            api_key: "test-key".into(),
+            base_url: None,
+        };
+        let provider = create_provider(&config).expect("create_provider should succeed");
+        assert_eq!(provider.id(), "openai");
+    }
+
+    #[test]
+    fn gitlawb_custom_base_url() {
+        let config = ProviderConfig::Gitlawb {
+            api_key: "test-key".into(),
+            base_url: Some("https://custom.example.com".into()),
+        };
+        let provider = create_provider(&config).expect("create_provider should succeed");
+        assert_eq!(provider.id(), "openai");
+    }
 }

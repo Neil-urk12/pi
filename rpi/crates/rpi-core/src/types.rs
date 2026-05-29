@@ -192,6 +192,14 @@ pub enum ProviderConfig {
         #[serde(default = "default_ollama_url")]
         base_url: String,
     },
+    /// Gitlawb OpenAI-compatible gateway configuration.
+    Gitlawb {
+        /// API key.
+        api_key: String,
+        /// Base URL override.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_url: Option<String>,
+    },
 }
 
 fn default_ollama_url() -> String {

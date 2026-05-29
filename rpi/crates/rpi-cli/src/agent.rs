@@ -350,6 +350,7 @@ impl AgentRunner {
             "ollama" => ProviderConfig::Ollama {
                 base_url: base_url.unwrap_or_else(|| "http://localhost:11434".to_string()),
             },
+            "gitlawb" => ProviderConfig::Gitlawb { api_key, base_url },
             _ => anyhow::bail!("Unknown provider: {}", model_id.provider),
         };
 
