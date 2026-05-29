@@ -14,8 +14,8 @@
 
 pub mod bash;
 pub mod edit_file;
-pub mod grep;
 pub mod find;
+pub mod grep;
 pub mod ls;
 pub mod read_file;
 pub mod write_file;

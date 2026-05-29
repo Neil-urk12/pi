@@ -33,6 +33,10 @@ struct Cli {
     #[arg(long)]
     tui: bool,
 
+    /// Resume an existing session by ID
+    #[arg(long)]
+    resume: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -46,6 +50,19 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Session management
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionAction {
+    /// List all sessions
+    List,
+    /// Delete a session by ID
+    Delete { session_id: String },
 }
 
 #[derive(Subcommand)]
@@ -61,7 +78,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let interactive_mode = cli.prompt.is_none()
         && !cli.list_models
-        && !matches!(cli.command, Some(Commands::Config { .. }));
+        && !matches!(cli.command, Some(Commands::Config { .. }))
+        && !matches!(cli.command, Some(Commands::Session { .. }));
     validate_tui_mode(interactive_mode, cli.tui)?;
 
     // Initialize tracing
@@ -73,7 +91,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // Load configuration
-    let config = Config::load()?;
+    let mut config = Config::load()?;
 
     match cli.command {
         Some(Commands::Config { action }) => match action {
@@ -81,14 +99,51 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&config)?);
             }
             ConfigAction::Set { key, value } => {
-                config.set(&key, &value)?;
+                config = config.set(&key, &value)?;
+                config.save()?;
                 println!("Set {key} = {value}");
             }
         },
+        Some(Commands::Session { action }) => {
+            use rpi_core::SessionManager;
+            let session_manager = SessionManager::new()?;
+            match action {
+                SessionAction::List => {
+                    let sessions = session_manager.list()?;
+                    if sessions.is_empty() {
+                        println!("No sessions found.");
+                    } else {
+                        println!("Sessions:");
+                        for s in &sessions {
+                            println!(
+                                "  {}  model={}  messages={}  created={}",
+                                s.session_id, s.model, s.message_count, s.created_at
+                            );
+                            if let Some(preview) = &s.last_message_preview {
+                                println!("    Preview: {preview}");
+                            }
+                        }
+                    }
+                }
+                SessionAction::Delete { session_id } => {
+                    session_manager.delete(&session_id)?;
+                    println!("Deleted session: {session_id}");
+                }
+            }
+        }
         _ => {
             // Default: run agent
             let model = cli.model.or(config.default_model.clone());
-            let mut runner = AgentRunner::new(config, model)?;
+            let mut runner = if let Some(ref session_id) = cli.resume {
+                use rpi_core::SessionManager;
+                let session_manager = SessionManager::new()?;
+                match session_manager.load(session_id) {
+                    Ok(session) => AgentRunner::with_session(config, model, session)?,
+                    Err(e) => anyhow::bail!("Session not found: {session_id}: {e}"),
+                }
+            } else {
+                AgentRunner::new(config, model)?
+            };
 
             if let Some(prompt) = cli.prompt {
                 // Single prompt mode

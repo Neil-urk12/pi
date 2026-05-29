@@ -236,7 +236,9 @@ pub struct ChatResponse {
 
 /// Escape XML tags in text to prevent injection into summary containers.
 pub fn escape_xml_tags(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]

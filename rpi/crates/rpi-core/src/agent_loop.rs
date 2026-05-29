@@ -1,7 +1,7 @@
 //! The agent loop — the core execution engine that orchestrates LLM calls and tool execution.
 
-use crate::error::PiError;
 use crate::compaction::CompactionSettings;
+use crate::error::PiError;
 use crate::traits::{Provider, Tool, ToolCallDelta};
 use crate::types::*;
 use futures::StreamExt;
@@ -87,8 +87,8 @@ pub enum AgentEvent {
     },
     /// Compaction completed.
     CompactionComplete {
-        /// Tokens after compaction.
-        tokens_after: u32,
+        /// The full compaction result.
+        result: crate::compaction::CompactionResult,
     },
 }
 
@@ -125,9 +125,11 @@ pub async fn run_agent_loop(
     config: &AgentLoopConfig,
     agent_config: &AgentConfig,
     mut on_event: impl FnMut(AgentEvent),
-    ) -> Result<(), PiError> {
+) -> Result<(), PiError> {
     // Derive context window: use configured value, or fall back to max(max_tokens, 128_000).
-    let context_window = config.compaction.as_ref()
+    let context_window = config
+        .compaction
+        .as_ref()
         .and_then(|s| s.context_window)
         .unwrap_or_else(|| std::cmp::max(agent_config.max_tokens.unwrap_or(128_000), 128_000u32));
     let mut total_usage = Usage {
@@ -139,15 +141,16 @@ pub async fn run_agent_loop(
     let mut last_turn_usage: Option<Usage> = None;
     let mut compaction_state: Option<(usize, String)> = None;
     let mut compaction_retries = 0u32;
+    // Build tool definitions once — tools don't change between turns.
+    let tool_defs: Vec<ToolDefinition> = tools.iter().map(|t| t.definition()).collect();
 
     loop {
-        // Build tool definitions
-        let tool_defs: Vec<ToolDefinition> = tools.iter().map(|t| t.definition()).collect();
 
         on_event(AgentEvent::TurnStart { turn });
 
         // Call the provider — catch overflow errors for compaction retry.
-        let provider_result: std::result::Result<Option<Vec<ToolCall>>, PiError> = if config.stream {
+        let provider_result: std::result::Result<Option<Vec<ToolCall>>, PiError> = if config.stream
+        {
             let stream_result = provider
                 .chat_stream(model, messages, &tool_defs, agent_config)
                 .await;
@@ -155,7 +158,8 @@ pub async fn run_agent_loop(
             match stream_result {
                 Ok(mut stream) => {
                     let mut current_text = String::new();
-                    let mut tool_call_deltas: HashMap<u32, crate::traits::ToolCallDelta> = HashMap::new();
+                    let mut tool_call_deltas: HashMap<u32, crate::traits::ToolCallDelta> =
+                        HashMap::new();
                     let mut last_finish_reason: Option<FinishReason> = None;
                     let mut stream_usage: Option<Usage> = None;
                     while let Some(chunk) = stream.next().await {
@@ -166,13 +170,14 @@ pub async fn run_agent_loop(
                         }
 
                         for tc_delta in &chunk.tool_calls {
-                            let entry = tool_call_deltas
-                                .entry(tc_delta.index)
-                                .or_insert_with(|| ToolCallDelta {
-                                    index: tc_delta.index,
-                                    id: None,
-                                    name: None,
-                                    arguments_delta: None,
+                            let entry =
+                                tool_call_deltas.entry(tc_delta.index).or_insert_with(|| {
+                                    ToolCallDelta {
+                                        index: tc_delta.index,
+                                        id: None,
+                                        name: None,
+                                        arguments_delta: None,
+                                    }
                                 });
                             if let Some(id) = &tc_delta.id {
                                 entry.id = Some(id.clone());
@@ -187,7 +192,8 @@ pub async fn run_agent_loop(
                                 entry.name = Some(name.clone());
                             }
                             if let Some(args) = &tc_delta.arguments_delta {
-                                let existing = entry.arguments_delta.get_or_insert_with(String::new);
+                                let existing =
+                                    entry.arguments_delta.get_or_insert_with(String::new);
                                 existing.push_str(args);
                                 if let Some(id) = &entry.id {
                                     on_event(AgentEvent::ToolCallDelta {
@@ -246,7 +252,8 @@ pub async fn run_agent_loop(
                     };
 
                     messages.push(assistant_msg.clone());
-                    let assistant_estimate = crate::token_estimation::estimate_tokens(&assistant_msg);
+                    let assistant_estimate =
+                        crate::token_estimation::estimate_tokens(&assistant_msg);
                     on_event(AgentEvent::TurnEnd {
                         turn,
                         message: assistant_msg,
@@ -260,16 +267,14 @@ pub async fn run_agent_loop(
                     });
 
                     // Update total usage — prefer actual API usage, fall back to heuristic.
-                    let turn_usage = stream_usage.take().unwrap_or_else(|| {
-                        Usage {
-                            prompt_tokens: 0,
-                            completion_tokens: assistant_estimate,
-                            total_tokens: assistant_estimate,
-                        }
+                    let turn_usage = stream_usage.take().unwrap_or_else(|| Usage {
+                        prompt_tokens: 0,
+                        completion_tokens: assistant_estimate,
+                        total_tokens: assistant_estimate,
                     });
-                    total_usage.prompt_tokens += turn_usage.prompt_tokens;
-                    total_usage.completion_tokens += turn_usage.completion_tokens;
-                    total_usage.total_tokens += turn_usage.total_tokens;
+                    total_usage.prompt_tokens = total_usage.prompt_tokens.saturating_add(turn_usage.prompt_tokens);
+                    total_usage.completion_tokens = total_usage.completion_tokens.saturating_add(turn_usage.completion_tokens);
+                    total_usage.total_tokens = total_usage.total_tokens.saturating_add(turn_usage.total_tokens);
                     last_turn_usage = Some(turn_usage);
 
                     Ok(if has_tool_calls {
@@ -281,11 +286,14 @@ pub async fn run_agent_loop(
                 Err(e) => Err(e),
             }
         } else {
-            match provider.chat(model, messages, &tool_defs, agent_config).await {
+            match provider
+                .chat(model, messages, &tool_defs, agent_config)
+                .await
+            {
                 Ok(response) => {
-                    total_usage.prompt_tokens += response.usage.prompt_tokens;
-                    total_usage.completion_tokens += response.usage.completion_tokens;
-                    total_usage.total_tokens += response.usage.total_tokens;
+                    total_usage.prompt_tokens = total_usage.prompt_tokens.saturating_add(response.usage.prompt_tokens);
+                    total_usage.completion_tokens = total_usage.completion_tokens.saturating_add(response.usage.completion_tokens);
+                    total_usage.total_tokens = total_usage.total_tokens.saturating_add(response.usage.total_tokens);
                     last_turn_usage = Some(response.usage.clone());
 
                     let assistant_msg = response.message.clone();
@@ -305,25 +313,39 @@ pub async fn run_agent_loop(
 
         // Handle overflow: attempt compaction and retry once.
         let tool_calls = match provider_result {
-            Ok(tc) => { compaction_retries = 0; tc },
+            Ok(tc) => {
+                compaction_retries = 0;
+                tc
+            }
             Err(e) if is_context_overflow(&e) && config.compaction.is_some() => {
                 on_event(AgentEvent::Error {
                     error: "Context overflow detected, attempting compaction...".to_string(),
                 });
-                let overflow_tokens: u32 = messages
-                    .iter()
-                    .map(crate::token_estimation::estimate_tokens)
-                    .sum();
+                let overflow_tokens = crate::token_estimation::sum_tokens_saturating(
+                    messages.iter().map(crate::token_estimation::estimate_tokens)
+                );
                 compaction_retries += 1;
                 if compaction_retries <= 2 {
-                    let compacted = try_compact(provider, model, messages, config, &mut on_event, &mut compaction_state, overflow_tokens).await;
+                    let compacted = try_compact(
+                        provider,
+                        model,
+                        messages,
+                        config,
+                        &mut on_event,
+                        &mut compaction_state,
+                        overflow_tokens,
+                    )
+                    .await;
                     if compacted {
                         compaction_retries = 0;
                         continue; // Successfully compacted, retry this turn
                     }
                     // Nothing to compact — messages already at minimum size.
                     // The overflow was handled as best we could.
-                    on_event(AgentEvent::Done { turns: turn + 1, total_usage: total_usage.clone() });
+                    on_event(AgentEvent::Done {
+                        turns: turn + 1,
+                        total_usage: total_usage.clone(),
+                    });
                     return Ok(());
                 }
                 return Err(e);
@@ -403,13 +425,30 @@ pub async fn run_agent_loop(
         }
 
         // After tool results, check if compaction should trigger.
+        // NOTE: estimate_context_tokens is O(n) on message count. We considered incremental
+        // tracking (adding estimate_tokens per new message), but the usage-based path in
+        // estimate_context_tokens is significantly more accurate when API usage is available.
+        // For typical sessions (hundreds of messages), the O(n) walk is negligible.
         if let Some(ref compaction_settings) = config.compaction {
             let context_tokens = crate::token_estimation::estimate_context_tokens(
                 messages,
                 last_turn_usage.as_ref(),
             );
-            if crate::compaction::should_compact(context_tokens, context_window, compaction_settings) {
-                try_compact(provider, model, messages, config, &mut on_event, &mut compaction_state, context_tokens).await;
+            if crate::compaction::should_compact(
+                context_tokens,
+                context_window,
+                compaction_settings,
+            ) {
+                try_compact(
+                    provider,
+                    model,
+                    messages,
+                    config,
+                    &mut on_event,
+                    &mut compaction_state,
+                    context_tokens,
+                )
+                .await;
             }
         }
     }
@@ -460,7 +499,9 @@ async fn try_compact(
     };
     // Use caller-provided token count for consistency with the trigger check.
 
-    on_event(AgentEvent::CompactionTriggered { tokens_before: context_tokens });
+    on_event(AgentEvent::CompactionTriggered {
+        tokens_before: context_tokens,
+    });
 
     let preparation = crate::compaction::prepare_compaction(
         messages,
@@ -485,15 +526,16 @@ async fn try_compact(
     match result {
         Ok(compaction_result) => {
             apply_compaction(messages, &compaction_result);
+            // After apply_compaction, messages = [summary, ...kept].
+            // The summary is always at index 0, so the first kept message
+            // index relative to the post-compaction array is 1.
+            // We must NOT store the pre-compaction first_kept_message_index
+            // because it becomes stale after the array is transformed.
             *compaction_state = Some((
-                compaction_result.first_kept_message_index,
+                1,
                 compaction_result.summary.clone(),
             ));
-            let tokens_after: u32 = messages
-                .iter()
-                .map(crate::token_estimation::estimate_tokens)
-                .sum();
-            on_event(AgentEvent::CompactionComplete { tokens_after });
+            on_event(AgentEvent::CompactionComplete { result: compaction_result.clone() });
             true
         }
         Err(e) => {
@@ -505,21 +547,29 @@ async fn try_compact(
     }
 }
 
-/// Apply a compaction result: remove compacted messages, insert summary, extend with kept.
-fn apply_compaction(messages: &mut Vec<Message>, result: &crate::compaction::CompactionResult) {
-    let kept: Vec<Message> = messages.drain(result.first_kept_message_index..).collect();
-    messages.clear();
-    messages.push(Message {
+/// Create the synthetic summary message injected after compaction.
+///
+/// Shared by [`apply_compaction`] (in-memory agent loop) and
+/// [`Session::build_context`] (session persistence) to guarantee
+/// identical formatting.
+pub fn create_compaction_summary_message(summary: &str) -> Message {
+    Message {
         role: Role::User,
         content: Some(MessageContent::Text(format!(
             "The conversation history before this point was compacted \
              into the following summary:\n\n<summary>\n{}\n</summary>",
-            escape_xml_tags(&result.summary)
+            escape_xml_tags(summary)
         ))),
         tool_calls: None,
         tool_call_id: None,
         name: None,
-    });
+    }
+}
+/// Apply a compaction result to the in-memory messages vector.
+pub fn apply_compaction(messages: &mut Vec<Message>, result: &crate::compaction::CompactionResult) {
+    let kept: Vec<Message> = messages.drain(result.first_kept_message_index..).collect();
+    messages.clear();
+    messages.push(create_compaction_summary_message(&result.summary));
     messages.extend(kept);
 }
 
@@ -527,9 +577,10 @@ fn apply_compaction(messages: &mut Vec<Message>, result: &crate::compaction::Com
 mod tests {
     use super::*;
     use crate::compaction::CompactionResult;
-    use async_trait::async_trait;
     use crate::traits::{ChatStream, StreamChunk};
     use crate::types::ModelId;
+    use async_trait::async_trait;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_is_context_overflow_openai_format() {
@@ -592,7 +643,9 @@ mod tests {
 
         #[async_trait]
         impl Provider for MockProvider {
-            fn id(&self) -> &str { "mock" }
+            fn id(&self) -> &str {
+                "mock"
+            }
 
             async fn chat(
                 &self,
@@ -625,14 +678,16 @@ mod tests {
                 _tools: &[ToolDefinition],
                 _config: &AgentConfig,
             ) -> crate::error::Result<ChatStream> {
-                let stream = futures::stream::iter(vec![
-                    Ok(StreamChunk {
-                        delta: Some("Hello".to_string()),
-                        tool_calls: vec![],
-                        finish_reason: Some(FinishReason::Stop),
-                        usage: Some(Usage { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 }),
+                let stream = futures::stream::iter(vec![Ok(StreamChunk {
+                    delta: Some("Hello".to_string()),
+                    tool_calls: vec![],
+                    finish_reason: Some(FinishReason::Stop),
+                    usage: Some(Usage {
+                        prompt_tokens: 10,
+                        completion_tokens: 2,
+                        total_tokens: 12,
                     }),
-                ]);
+                })]);
                 Ok(Box::pin(stream))
             }
         }
@@ -640,15 +695,13 @@ mod tests {
         // This test verifies that streaming path tracks usage
         // Currently it doesn't, so this test will fail
         let provider = MockProvider;
-        let mut messages = vec![
-            Message {
-                role: Role::User,
-                content: Some(MessageContent::Text("Hi".to_string())),
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            },
-        ];
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("Hi".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
         let config = AgentLoopConfig {
             max_tool_rounds: 1,
             stream: true,
@@ -674,7 +727,8 @@ mod tests {
                 &config,
                 &agent_config,
                 |event| events.push(event),
-            ).await
+            )
+            .await
         });
         assert!(result.is_ok());
 
@@ -739,7 +793,10 @@ mod tests {
             name: None,
         }];
         let expected_tokens = crate::token_estimation::estimate_context_tokens(&messages, None);
-        assert!(expected_tokens > 0, "Token estimation must return positive value");
+        assert!(
+            expected_tokens > 0,
+            "Token estimation must return positive value"
+        );
     }
 
     #[test]
@@ -777,7 +834,7 @@ mod tests {
     #[test]
     fn test_is_context_overflow_false_positive_rate_limit() {
         let error = PiError::Provider(
-            "Rate limit exceeded. Too many requests, please retry after 60 seconds.".to_string()
+            "Rate limit exceeded. Too many requests, please retry after 60 seconds.".to_string(),
         );
         assert!(
             !is_context_overflow(&error),
@@ -788,7 +845,7 @@ mod tests {
     #[test]
     fn test_is_context_overflow_false_positive_generic_token_mention() {
         let error = PiError::Provider(
-            "The token limit for this API key has been reached. Please upgrade.".to_string()
+            "The token limit for this API key has been reached. Please upgrade.".to_string(),
         );
         assert!(
             !is_context_overflow(&error),
@@ -798,9 +855,8 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_false_positive_request_body_too_large() {
-        let error = PiError::Provider(
-            "Request body too large. Maximum allowed size is 10MB.".to_string()
-        );
+        let error =
+            PiError::Provider("Request body too large. Maximum allowed size is 10MB.".to_string());
         assert!(
             !is_context_overflow(&error),
             "Request body size limit should NOT be context overflow"
@@ -811,16 +867,16 @@ mod tests {
     fn test_is_context_overflow_true_positive_openai_verbose() {
         let error = PiError::Provider(
             "This model's maximum context length is 128000 tokens. \
-             However, your messages resulted in 150000 tokens.".to_string()
+             However, your messages resulted in 150000 tokens."
+                .to_string(),
         );
         assert!(is_context_overflow(&error), "OpenAI overflow must match");
     }
 
     #[test]
     fn test_is_context_overflow_true_positive_anthropic_verbose() {
-        let error = PiError::Provider(
-            "prompt is too long: 200000 tokens > 180000 maximum".to_string()
-        );
+        let error =
+            PiError::Provider("prompt is too long: 200000 tokens > 180000 maximum".to_string());
         assert!(is_context_overflow(&error), "Anthropic overflow must match");
     }
 
@@ -872,15 +928,16 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         // Mock provider returns overflow on specific calls, success on others.
-        // Call sequence:
+        // Call sequence (with correct compaction_state after Finding 2 fix):
         //   0: overflow (main chat turn 1)
         //   1: success (compact summary, non-split)
         //   2: success with tool call (retry turn 1)
         //   3: overflow (main chat turn 2)
-        //   4: success (compact split - history summary)
-        //   5: success (compact split - prefix summary)
-        //   6: success with tool call (retry turn 2)
-        //   7: overflow (main chat turn 3)
+        //   4: success (compact, non-split)
+        //   5: success with tool call (retry turn 2)
+        //   6: overflow (main chat turn 3)
+        //   7: success (compact, non-split)
+        //   8: success with tool call (retry turn 3)
         // With the bug: compaction_retries=3 > 2, compaction skipped.
         // Without the bug: retries would reset, compaction attempted.
         struct RetryMockProvider {
@@ -889,7 +946,9 @@ mod tests {
 
         #[async_trait]
         impl Provider for RetryMockProvider {
-            fn id(&self) -> &str { "retry-mock" }
+            fn id(&self) -> &str {
+                "retry-mock"
+            }
 
             async fn chat(
                 &self,
@@ -900,19 +959,25 @@ mod tests {
             ) -> crate::error::Result<ChatResponse> {
                 let call = self.call_count.fetch_add(1, Ordering::SeqCst);
                 match call {
-                    0 | 3 | 7 => Err(PiError::Provider("context_length_exceeded".to_string())),
-                    1 | 4 | 5 => Ok(ChatResponse {
+                    0 | 3 | 6 => Err(PiError::Provider("context_length_exceeded".to_string())),
+                    1 | 4 | 7 => Ok(ChatResponse {
                         message: Message {
                             role: Role::Assistant,
-                            content: Some(MessageContent::Text("Summary of conversation".to_string())),
+                            content: Some(MessageContent::Text(
+                                "Summary of conversation".to_string(),
+                            )),
                             tool_calls: None,
                             tool_call_id: None,
                             name: None,
                         },
                         finish_reason: FinishReason::Stop,
-                        usage: Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+                        usage: Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 5,
+                            total_tokens: 15,
+                        },
                     }),
-                    2 | 6 => Ok(ChatResponse {
+                    2 | 5 => Ok(ChatResponse {
                         message: Message {
                             role: Role::Assistant,
                             content: None,
@@ -927,6 +992,40 @@ mod tests {
                             name: None,
                         },
                         finish_reason: FinishReason::ToolCalls,
+                        usage: Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 5,
+                            total_tokens: 15,
+                        },
+                    }),
+                    8 => Ok(ChatResponse {
+                        message: Message {
+                            role: Role::Assistant,
+                            content: None,
+                            tool_calls: Some(vec![ToolCall {
+                                id: "call_1".to_string(),
+                                function: FunctionCall {
+                                    name: "big_tool".to_string(),
+                                    arguments: "{}".to_string(),
+                                },
+                            }]),
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        finish_reason: FinishReason::ToolCalls,
+                        usage: Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+                    }),
+                    9 => Ok(ChatResponse {
+                        message: Message {
+                            role: Role::Assistant,
+                            content: Some(MessageContent::Text(
+                                "after 3rd compaction".to_string(),
+                            )),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        finish_reason: FinishReason::Stop,
                         usage: Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
                     }),
                     other => panic!("Unexpected call #{other}"),
@@ -950,7 +1049,9 @@ mod tests {
 
         #[async_trait]
         impl Tool for BigTool {
-            fn name(&self) -> &str { "big_tool" }
+            fn name(&self) -> &str {
+                "big_tool"
+            }
             fn definition(&self) -> ToolDefinition {
                 ToolDefinition {
                     name: "big_tool".to_string(),
@@ -964,15 +1065,26 @@ mod tests {
         }
 
         // 10 alternating U/A messages, each ~252 tokens. Total ~2520.
-        let mut messages: Vec<Message> = (0..10u32).map(|i| Message {
-            role: if i % 2 == 0 { Role::User } else { Role::Assistant },
-            content: Some(MessageContent::Text(format!("msg {i}: {}", "y".repeat(1000)))),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        }).collect();
+        let mut messages: Vec<Message> = (0..10u32)
+            .map(|i| Message {
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: Some(MessageContent::Text(format!(
+                    "msg {i}: {}",
+                    "y".repeat(1000)
+                ))),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+            .collect();
 
-        let provider = RetryMockProvider { call_count: AtomicU32::new(0) };
+        let provider = RetryMockProvider {
+            call_count: AtomicU32::new(0),
+        };
         let tool = BigTool;
         let config = AgentLoopConfig {
             max_tool_rounds: 20,
@@ -1004,7 +1116,8 @@ mod tests {
             |event| events.push(event),
         ));
 
-        let compaction_count = events.iter()
+        let compaction_count = events
+            .iter()
             .filter(|e| matches!(e, AgentEvent::CompactionTriggered { .. }))
             .count();
 
@@ -1034,7 +1147,9 @@ mod tests {
 
         #[async_trait]
         impl Provider for ContentFilterProvider {
-            fn id(&self) -> &str { "content-filter" }
+            fn id(&self) -> &str {
+                "content-filter"
+            }
 
             async fn chat(
                 &self,
@@ -1129,7 +1244,9 @@ mod tests {
 
         #[async_trait]
         impl Provider for HighUsageProvider {
-            fn id(&self) -> &str { "high-usage" }
+            fn id(&self) -> &str {
+                "high-usage"
+            }
 
             async fn chat(
                 &self,
@@ -1171,7 +1288,11 @@ mod tests {
                             name: None,
                         },
                         finish_reason: FinishReason::Stop,
-                        usage: Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+                        usage: Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 5,
+                            total_tokens: 15,
+                        },
                     }),
                     other => panic!("Unexpected call #{other}"),
                 }
@@ -1192,7 +1313,9 @@ mod tests {
 
         #[async_trait]
         impl Tool for EchoTool {
-            fn name(&self) -> &str { "echo" }
+            fn name(&self) -> &str {
+                "echo"
+            }
             fn definition(&self) -> ToolDefinition {
                 ToolDefinition {
                     name: "echo".to_string(),
@@ -1213,7 +1336,9 @@ mod tests {
             name: None,
         }];
 
-        let provider = HighUsageProvider { call_count: AtomicU32::new(0) };
+        let provider = HighUsageProvider {
+            call_count: AtomicU32::new(0),
+        };
         let tool = EchoTool;
         // Threshold = 128_000 - 16_384 = 111_616 tokens.
         // Provider reports 150k total_tokens in usage.
@@ -1244,7 +1369,8 @@ mod tests {
             |event| events.push(event),
         ));
 
-        let compaction_triggered = events.iter()
+        let compaction_triggered = events
+            .iter()
             .any(|e| matches!(e, AgentEvent::CompactionTriggered { .. }));
 
         // The provider reported 150k total_tokens. The compaction check should
@@ -1287,7 +1413,9 @@ mod tests {
 
         #[async_trait]
         impl Provider for ToolCallProvider {
-            fn id(&self) -> &str { "toolcall-mock" }
+            fn id(&self) -> &str {
+                "toolcall-mock"
+            }
 
             async fn chat(
                 &self,
@@ -1355,7 +1483,9 @@ mod tests {
 
         #[async_trait]
         impl Tool for NoopTool {
-            fn name(&self) -> &str { "noop" }
+            fn name(&self) -> &str {
+                "noop"
+            }
 
             fn definition(&self) -> ToolDefinition {
                 ToolDefinition {
@@ -1380,7 +1510,9 @@ mod tests {
             })
             .collect();
 
-        let provider = ToolCallProvider { call_count: AtomicU32::new(0) };
+        let provider = ToolCallProvider {
+            call_count: AtomicU32::new(0),
+        };
         let noop_tool: Box<dyn Tool> = Box::new(NoopTool);
         let config = AgentLoopConfig {
             max_tool_rounds: 10,
@@ -1412,7 +1544,8 @@ mod tests {
             |event| events.push(event),
         ));
 
-        let compaction_triggered = events.iter()
+        let compaction_triggered = events
+            .iter()
             .any(|e| matches!(e, AgentEvent::CompactionTriggered { .. }));
 
         // After 8 tool-call turns, cumulative total_usage = 8 * 5000 = 40000.
@@ -1495,9 +1628,8 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_mistral_format() {
-        let error = PiError::Provider(
-            "The model's maximum context length is 32768 tokens".to_string()
-        );
+        let error =
+            PiError::Provider("The model's maximum context length is 32768 tokens".to_string());
         assert!(
             is_context_overflow(&error),
             "Mistral format should be detected"
@@ -1506,9 +1638,7 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_cohere_format() {
-        let error = PiError::Provider(
-            "context: too many tokens for the model".to_string()
-        );
+        let error = PiError::Provider("context: too many tokens for the model".to_string());
         assert!(
             is_context_overflow(&error),
             "Cohere format should be detected"
@@ -1518,9 +1648,8 @@ mod tests {
     #[test]
     fn test_is_context_overflow_ambiguous_rate_limit() {
         // Contains "context" and "exceeded" but is a rate limit
-        let error = PiError::Provider(
-            "Request rate limit exceeded. Context: API quota.".to_string()
-        );
+        let error =
+            PiError::Provider("Request rate limit exceeded. Context: API quota.".to_string());
         // Known false positive: 'context' + 'exceeded' matches.
         let matched = is_context_overflow(&error);
         assert!(
@@ -1551,16 +1680,423 @@ mod tests {
             summary: "Before </summary> after <script>".to_string(),
             first_kept_message_index: 1,
             tokens_before: 100,
+            tokens_after: 50,
         };
         apply_compaction(&mut messages, &result);
         let text = match &messages[0].content {
             Some(MessageContent::Text(t)) => t.clone(),
             _ => panic!("Expected text"),
         };
-        assert!(text.contains("&lt;/summary&gt;"), "Should escape tags in summary content");
+        assert!(
+            text.contains("&lt;/summary&gt;"),
+            "Should escape tags in summary content"
+        );
         // The format string itself contains </summary> as a delimiter — that's fine.
         // The escaped content should appear inside the <summary> block.
-        // Note: the format string contains </summary> as a delimiter — that's expected.
-        // The escaped content (&lt;/summary&gt;) should appear inside the <summary> block.
+    }
+
+    // --- Task 1.4: Tests for compaction metadata in agent loop ---
+
+    struct SummaryProvider {
+        call_count: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl Provider for SummaryProvider {
+        fn id(&self) -> &str {
+            "summary-mock"
+        }
+
+        async fn chat(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &AgentConfig,
+        ) -> crate::error::Result<ChatResponse> {
+            let call = self.call_count.fetch_add(1, Ordering::Relaxed);
+            match call {
+                0 => Err(PiError::Provider("context_length_exceeded".to_string())),
+                1 => Ok(ChatResponse {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: Some(MessageContent::Text(
+                            "Compacted summary of conversation".to_string(),
+                        )),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    finish_reason: FinishReason::Stop,
+                    usage: Usage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                    },
+                }),
+                2 => Ok(ChatResponse {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: Some(MessageContent::Text("done".to_string())),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    finish_reason: FinishReason::Stop,
+                    usage: Usage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                    },
+                }),
+                other => panic!("Unexpected call #{other}"),
+            }
+        }
+
+        async fn chat_stream(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _config: &AgentConfig,
+        ) -> crate::error::Result<ChatStream> {
+            panic!("chat_stream should not be called")
+        }
+    }
+
+    fn setup_compaction_test() -> (
+        SummaryProvider,
+        Vec<Message>,
+        AgentLoopConfig,
+        AgentConfig,
+        Vec<AgentEvent>,
+    ) {
+        let big_text = "x".repeat(1000);
+        let messages: Vec<Message> = (0..10u32)
+            .map(|i| Message {
+                role: if i % 2 == 0 {
+                    Role::User
+                } else {
+                    Role::Assistant
+                },
+                content: Some(MessageContent::Text(format!("msg {i}: {big_text}"))),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+            .collect();
+
+        let provider = SummaryProvider {
+            call_count: std::sync::atomic::AtomicU32::new(0),
+        };
+        let config = AgentLoopConfig {
+            max_tool_rounds: 1,
+            stream: false,
+            compaction: Some(CompactionSettings {
+                reserve_tokens: 100,
+                keep_recent_tokens: 1250,
+                enabled: true,
+                ..Default::default()
+            }),
+        };
+        let agent_config = AgentConfig {
+            model: ModelId::new("mock", "mock-model"),
+            max_tokens: Some(1000),
+            temperature: Some(0.7),
+            system_prompt: None,
+            max_iterations: 10,
+        };
+        let events = Vec::new();
+
+        (provider, messages, config, agent_config, events)
+    }
+
+    #[tokio::test]
+    async fn test_compaction_reduces_tokens() {
+        let (provider, mut messages, config, agent_config, mut events) = setup_compaction_test();
+
+        let _ = run_agent_loop(
+            &provider,
+            "mock-model",
+            &mut messages,
+            &[],
+            &config,
+            &agent_config,
+            |event| events.push(event),
+        )
+        .await;
+
+        let tokens_before = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::CompactionTriggered { tokens_before } => Some(*tokens_before),
+                _ => None,
+            })
+            .expect("Should have CompactionTriggered event");
+
+        let tokens_after = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::CompactionComplete { result } => Some(result.tokens_after),
+                _ => None,
+            })
+            .expect("Should have CompactionComplete event");
+
+        assert!(
+            tokens_before > tokens_after,
+            "Compaction should reduce tokens: before={}, after={}",
+            tokens_before,
+            tokens_after,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compaction_summary_content() {
+        let (provider, mut messages, config, agent_config, mut events) = setup_compaction_test();
+
+        let _ = run_agent_loop(
+            &provider,
+            "mock-model",
+            &mut messages,
+            &[],
+            &config,
+            &agent_config,
+            |event| events.push(event),
+        )
+        .await;
+
+        assert!(
+            messages.len() >= 2,
+            "After compaction, should have summary + kept messages, got {} messages",
+            messages.len(),
+        );
+
+        let summary_text = match &messages[0].content {
+            Some(MessageContent::Text(t)) => t.clone(),
+            _ => panic!("Expected summary as text"),
+        };
+        assert!(!summary_text.is_empty(), "Summary should be non-empty");
+        assert!(
+            summary_text.contains("Compacted summary of conversation"),
+            "Summary should contain the provider's summary text"
+        );
+    }
+
+    // -- Finding 1: apply_compaction keeps bare Tool after split --------------------
+
+    #[test]
+    fn test_apply_compaction_keeps_bare_tool_after_split() {
+        // FIX: find_cut_point now backs up when it lands on a Tool message,
+        // so first_kept_message_index points at the owning Assistant with tool_calls.
+        // This ensures the kept context never starts with a bare Tool result.
+
+        let mut msgs = vec![
+            Message {
+                role: Role::User,
+                content: Some(MessageContent::Text("first".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "c1".to_string(),
+                    function: FunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(MessageContent::Text("contents".to_string())),
+                tool_calls: None,
+                tool_call_id: Some("c1".to_string()),
+                name: None,
+            },
+            Message {
+                role: Role::User,
+                content: Some(MessageContent::Text("second".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Assistant,
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "c2".to_string(),
+                    function: FunctionCall {
+                        name: "run_cmd".to_string(),
+                        arguments: "{}".to_string(),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: Some(MessageContent::Text("output".to_string())),
+                tool_calls: None,
+                tool_call_id: Some("c2".to_string()),
+                name: None,
+            },
+        ];
+
+        // After fix: find_cut_point backs up from Tool to owning Assistant.
+        // first_kept_message_index = 4 (the Assistant with tool_calls), not 5.
+        let result = CompactionResult {
+            summary: "Previous conversation summary".to_string(),
+            first_kept_message_index: 4,
+            tokens_before: 100,
+            tokens_after: 50,
+        };
+
+        apply_compaction(&mut msgs, &result);
+
+        // messages[0] = summary (User role with compacted text)
+        assert_eq!(
+            msgs[0].role,
+            Role::User,
+            "First message should be the summary"
+        );
+        let summary_text = match &msgs[0].content {
+            Some(MessageContent::Text(t)) => t,
+            _ => panic!("Expected summary text"),
+        };
+        assert!(
+            summary_text.contains("Previous conversation summary"),
+            "Summary text should be present"
+        );
+
+        // messages[1] = first kept message — the Assistant with tool_calls
+        assert_eq!(
+            msgs[1].role,
+            Role::Assistant,
+            "First kept message is Assistant with tool_calls (not bare Tool)"
+        );
+        assert!(
+            msgs[1].tool_calls.as_ref().is_some_and(|tc| !tc.is_empty()),
+            "First kept Assistant should have tool_calls"
+        );
+
+        // messages[2] = Tool result matching the tool_call
+        assert_eq!(
+            msgs[2].role,
+            Role::Tool,
+            "Second kept message is Tool result"
+        );
+
+        // Verify kept context has valid assistant→tool pairing (no orphan)
+        assert_eq!(
+            msgs.len(),
+            3,
+            "Kept context: summary + assistant(tool_calls) + tool result"
+        );
+
+        // Confirm the assistant with tool_calls is present before the tool result
+        let has_assistant_with_tool_calls = msgs.iter().any(|m| {
+            m.role == Role::Assistant && m.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
+        });
+        assert!(
+            has_assistant_with_tool_calls,
+            "Assistant with tool_calls must be present — tool result is not orphaned"
+        );
+    }
+
+    // --- Finding 2: Double-compaction breaks start_after_index arithmetic ---
+
+    #[test]
+    fn test_double_compaction_stale_vs_fixed_compaction_state() {
+        use crate::compaction::{prepare_compaction, CompactionSettings};
+
+        // Create 10 messages, each ~2000 chars -> ~500 tokens.
+        let big_text = "x".repeat(2000);
+        let messages: Vec<Message> = (0..10u32)
+            .map(|i| Message {
+                role: Role::User,
+                content: Some(MessageContent::Text(format!("msg {i}: {big_text}"))),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            })
+            .collect();
+
+        let settings = CompactionSettings {
+            keep_recent_tokens: 1500,
+            ..Default::default()
+        };
+
+        // First compaction: no previous index.
+        let prep1 = prepare_compaction(&messages, &settings, None).unwrap();
+        let stale_first_kept = prep1.first_kept_message_index;
+        assert!(stale_first_kept > 0, "Should compact some messages");
+        assert!(stale_first_kept < messages.len(), "Should keep some messages");
+
+        // Simulate apply_compaction: [summary, ...messages[stale_first_kept..]]
+        let mut compacted: Vec<Message> = Vec::new();
+        compacted.push(Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("<summary>old conversation</summary>".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+        compacted.extend_from_slice(&messages[stale_first_kept..]);
+
+        // Add a new message (simulating loop output between compactions).
+        compacted.push(Message {
+            role: Role::User,
+            content: Some(MessageContent::Text(format!("new msg: {big_text}"))),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        });
+
+        // BUG: passing stale first_kept (relative to pre-compaction array) as
+        // previous_first_kept_index. find_cut_point uses this as start_after_index
+        // which may exceed the compacted array length.
+        let prep_buggy = prepare_compaction(&compacted, &settings, Some(stale_first_kept));
+        assert!(
+            prep_buggy.is_none(),
+            "Stale index {stale_first_kept} on {len}-element array should fail \
+             because find_cut_point returns None when messages.len() <= start",
+            len = compacted.len()
+        );
+
+        // FIX: after apply_compaction, summary is always at index 0, so we
+        // store 1 as previous_first_kept_index. This lets find_cut_point
+        // walk the kept messages (indices 1..len) correctly.
+        let fixed_first_kept = 1usize; // What try_compact now stores
+        let prep_fixed = prepare_compaction(&compacted, &settings, Some(fixed_first_kept));
+        assert!(
+            prep_fixed.is_some(),
+            "With fixed previous_first_kept_index=1, second compaction \
+             should find a cut point on {len}-element array.",
+            len = compacted.len()
+        );
+
+        let prep_fixed = prep_fixed.unwrap();
+        // The second compaction should be able to compact the summary message.
+        // With first_kept=2, messages_to_summarize = [summary, kept[0]],
+        // which includes the summary at index 0. Verify it's included.
+        assert!(
+            !prep_fixed.messages_to_summarize.is_empty(),
+            "Fixed compaction should have messages to summarize.",
+        );
+        let first_msg = &prep_fixed.messages_to_summarize[0];
+        let first_text = match &first_msg.content {
+            Some(MessageContent::Text(t)) => t.clone(),
+            _ => String::new(),
+        };
+        assert!(
+            first_text.contains("<summary>"),
+            "Fixed compaction should include the summary message in to-summarize. \
+             Got: {first_text}",
+        );
     }
 }

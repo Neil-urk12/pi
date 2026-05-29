@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use rpi_core::{PiError, Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Performs text replacement in a file.
 ///
@@ -19,10 +19,9 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description:
-                "Replace all occurrences of `old_text` with `new_text` in a file. \
+            description: "Replace all occurrences of `old_text` with `new_text` in a file. \
                  Returns an error if the old text is not found."
-                    .to_string(),
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -87,10 +86,7 @@ impl Tool for EditFileTool {
         if count == 0 {
             return Err(PiError::Tool {
                 tool: "edit_file".to_string(),
-                message: format!(
-                    "'old_text' not found in '{}'. File was not modified.",
-                    path
-                ),
+                message: format!("'old_text' not found in '{}'. File was not modified.", path),
             });
         }
 

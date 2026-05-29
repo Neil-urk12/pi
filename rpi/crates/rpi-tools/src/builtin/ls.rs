@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use rpi_core::{PiError, Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
 /// Lists directory contents with metadata (type, size).
@@ -20,10 +20,9 @@ impl Tool for LsTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "ls".to_string(),
-            description:
-                "List directory contents. Returns entries sorted alphabetically with \
+            description: "List directory contents. Returns entries sorted alphabetically with \
                  type indicators (/ for directories) and file sizes."
-                    .to_string(),
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -53,21 +52,17 @@ impl Tool for LsTool {
         }
 
         if path.is_file() {
-            let meta = tokio::fs::metadata(path)
-                .await
-                .map_err(|e| PiError::Tool {
-                    tool: "ls".to_string(),
-                    message: format!("failed to read metadata for '{}': {}", dir, e),
-                })?;
+            let meta = tokio::fs::metadata(path).await.map_err(|e| PiError::Tool {
+                tool: "ls".to_string(),
+                message: format!("failed to read metadata for '{}': {}", dir, e),
+            })?;
             return Ok(format!("{} ({} bytes)", dir, meta.len()));
         }
 
-        let mut entries = tokio::fs::read_dir(path)
-            .await
-            .map_err(|e| PiError::Tool {
-                tool: "ls".to_string(),
-                message: format!("failed to read directory '{}': {}", dir, e),
-            })?;
+        let mut entries = tokio::fs::read_dir(path).await.map_err(|e| PiError::Tool {
+            tool: "ls".to_string(),
+            message: format!("failed to read directory '{}': {}", dir, e),
+        })?;
 
         let mut items: Vec<(String, bool, u64)> = Vec::new();
 

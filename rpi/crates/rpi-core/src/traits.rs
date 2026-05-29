@@ -32,9 +32,7 @@ pub struct ToolCallDelta {
 }
 
 /// Stream of chat response chunks.
-pub type ChatStream = std::pin::Pin<
-    Box<dyn futures::Stream<Item = Result<StreamChunk>> + Send>,
->;
+pub type ChatStream = std::pin::Pin<Box<dyn futures::Stream<Item = Result<StreamChunk>> + Send>>;
 
 /// An LLM provider (OpenAI, Anthropic, Ollama, etc.).
 ///
@@ -102,10 +100,7 @@ pub trait Agent: Send + Sync {
     /// Run the agent loop and stream the response.
     ///
     /// Tool calls are still handled internally; this streams the text output.
-    async fn run_stream(
-        &self,
-        messages: &mut Vec<Message>,
-    ) -> Result<ChatStream>;
+    async fn run_stream(&self, messages: &mut Vec<Message>) -> Result<ChatStream>;
 }
 
 // Re-export futures so downstream crates don't need the dep.

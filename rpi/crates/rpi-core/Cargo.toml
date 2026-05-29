@@ -30,6 +30,7 @@ futures = { workspace = true }
 dirs = { workspace = true }
 # Async traits
 async-trait = "0.1"
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"

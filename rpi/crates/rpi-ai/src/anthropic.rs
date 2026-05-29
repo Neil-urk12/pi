@@ -19,7 +19,7 @@ use rpi_core::{
     Usage,
 };
 
-use crate::streaming::{sse_stream, SseEvent};
+use crate::streaming::{SseEvent, sse_stream};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -302,9 +302,9 @@ fn process_anthropic_event(
             Ok(None)
         }
         "message_delta" => {
-            let msg_delta: MessageDeltaEvent = event.json().map_err(|e| {
-                PiError::Provider(format!("Failed to parse message_delta: {e}"))
-            })?;
+            let msg_delta: MessageDeltaEvent = event
+                .json()
+                .map_err(|e| PiError::Provider(format!("Failed to parse message_delta: {e}")))?;
             let finish_reason = msg_delta
                 .delta
                 .stop_reason
@@ -402,8 +402,14 @@ struct AnthropicResponse {
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicResponseContent {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 #[derive(Deserialize, Debug)]
@@ -551,8 +557,8 @@ fn to_anthropic_messages(messages: &[Message]) -> (Option<String>, Vec<Anthropic
                 // Tool calls → tool_use blocks.
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
-                        let input: serde_json::Value =
-                            serde_json::from_str(&tc.function.arguments).unwrap_or_else(|_| {
+                        let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or_else(|_| {
                                 serde_json::Value::String(tc.function.arguments.clone())
                             });
                         blocks.push(AnthropicContentValue::ToolUse {
@@ -579,9 +585,7 @@ fn to_anthropic_messages(messages: &[Message]) -> (Option<String>, Vec<Anthropic
                         for block in blocks {
                             match block {
                                 ContentBlock::ToolResult {
-                                    content,
-                                    is_error,
-                                    ..
+                                    content, is_error, ..
                                 } => {
                                     texts.push(content.clone());
                                     if *is_error {
@@ -745,4 +749,3 @@ fn parse_stop_reason(reason: &str) -> Option<FinishReason> {
         _ => None,
     }
 }
-

@@ -43,36 +43,60 @@ fn detect_content_type(text: &str) -> ContentType {
 fn has_code_semicolons(text: &str) -> bool {
     text.lines().any(|line| {
         line.ends_with(';')
-            && line.trim_end_matches(';').ends_with(|c: char| !c.is_ascii_lowercase())
+            && line
+                .trim_end_matches(';')
+                .ends_with(|c: char| !c.is_ascii_lowercase())
     })
 }
 /// Check if text contains structural patterns that indicate code.
 fn has_structural_patterns(text: &str) -> bool {
     // Patterns that strongly indicate code structure beyond just keywords
-    text.contains("=>") ||
-    text.contains("//") ||
-    text.contains("/*") ||
-    text.contains("*/") ||
-    text.contains("; ") ||
-    text.ends_with(';') ||
-    has_multi_line_indent(text) ||
-    has_code_semicolons(text) ||
-    text.contains('\t') // tab indentation
+    text.contains("=>")
+        || text.contains("//")
+        || text.contains("/*")
+        || text.contains("*/")
+        || text.contains("; ")
+        || text.ends_with(';')
+        || has_multi_line_indent(text)
+        || has_code_semicolons(text)
+        || text.contains('\t') // tab indentation
 }
 
 /// Check if 3+ lines are indented (code blocks), avoiding false positives on
 /// markdown lists which typically have fewer indented lines.
 fn has_multi_line_indent(text: &str) -> bool {
-    text.lines().filter(|line| line.starts_with("    ")).nth(2).is_some()
+    text.lines()
+        .filter(|line| line.starts_with("    "))
+        .nth(2)
+        .is_some()
 }
 /// Check if text looks like programming code.
 fn is_code(text: &str) -> bool {
     // Common code patterns
     let code_indicators = [
-        "fn ", "let ", "const ", "var ", "function ", "class ",
-        "def ", "import ", "from ", "return ", "if (", "for (",
-        "while (", "match ", "switch ", "case ", "break;", "continue;",
-        "//", "/*", "*/", "=>", "println!",
+        "fn ",
+        "let ",
+        "const ",
+        "var ",
+        "function ",
+        "class ",
+        "def ",
+        "import ",
+        "from ",
+        "return ",
+        "if (",
+        "for (",
+        "while (",
+        "match ",
+        "switch ",
+        "case ",
+        "break;",
+        "continue;",
+        "//",
+        "/*",
+        "*/",
+        "=>",
+        "println!",
     ];
 
     let mut code_score = 0;
@@ -114,7 +138,7 @@ fn is_technical(text: &str) -> bool {
         || text.contains("<?")
         || text.contains("<![CDATA[")
         || (text.contains('{') && text.contains(':'))  // JSON-like key-value
-        || text.contains("://")  // URLs with protocol
+        || text.contains("://") // URLs with protocol
 }
 
 /// Estimate token count for a single message using chars/4 heuristic.
@@ -175,16 +199,21 @@ pub fn estimate_context_tokens(messages: &[Message], last_usage: Option<&Usage>)
     match last_usage {
         Some(usage) if usage.total_tokens > 0 => {
             if let Some(last_idx) = messages.iter().rposition(|m| m.role == Role::Assistant) {
-                let trailing: u32 = messages.iter().skip(last_idx + 1)
-                    .map(estimate_tokens)
-                    .sum();
-                usage.total_tokens + trailing
+                let trailing = sum_tokens_saturating(
+                    messages.iter().skip(last_idx + 1).map(estimate_tokens),
+                );
+                usage.total_tokens.saturating_add(trailing)
             } else {
-                messages.iter().map(estimate_tokens).sum()
+                sum_tokens_saturating(messages.iter().map(estimate_tokens))
             }
         }
-        _ => messages.iter().map(estimate_tokens).sum(),
+        _ => sum_tokens_saturating(messages.iter().map(estimate_tokens)),
     }
+}
+
+/// Sum token estimates with saturating arithmetic (no overflow panic).
+pub fn sum_tokens_saturating<I: Iterator<Item = u32>>(iter: I) -> u32 {
+    iter.fold(0u32, |acc, x| acc.saturating_add(x))
 }
 
 #[cfg(test)]
@@ -216,7 +245,7 @@ mod tests {
             tool_calls: Some(vec![ToolCall {
                 id: "call_1".to_string(),
                 function: FunctionCall {
-                    name: "read_file".to_string(), // 9 chars
+                    name: "read_file".to_string(),                        // 9 chars
                     arguments: "{\"path\":\"/tmp/test.rs\"}".to_string(), // 22 chars
                 },
             }]),
@@ -350,7 +379,10 @@ mod tests {
         let prose = "The function (which was defined earlier) returns Ok(result). \
                      Use the {key: value} pattern when needed. See also [1] and [2].";
         // Current is_code() returns true because {, }, (, ), [ ] each add to score
-        assert!(!is_code(prose), "Regular prose with braces/parens should not be classified as code");
+        assert!(
+            !is_code(prose),
+            "Regular prose with braces/parens should not be classified as code"
+        );
     }
 
     // FINDING #1b: is_code() false-positive on prose with multiple code-like keywords
@@ -359,12 +391,13 @@ mod tests {
         // Each of these prose sentences contains >= 2 code_indicators from is_code(),
         // causing a false-positive classification as code.
         let sentences = [
-            "The function returns the result to the caller",         // "function " + "return "
-            "Let me import the data from the file",                 // "let " + "import " + "from "
-            "We need to return to the class discussion",            // "return " + "class "
+            "The function returns the result to the caller", // "function " + "return "
+            "Let me import the data from the file",          // "let " + "import " + "from "
+            "We need to return to the class discussion",     // "return " + "class "
         ];
         for prose in &sentences {
-            assert!(!is_code(prose),
+            assert!(
+                !is_code(prose),
                 "Prose with multiple common English words should not be classified as code: \"{}\"",
                 prose
             );
@@ -374,7 +407,10 @@ mod tests {
     #[test]
     fn test_is_code_real_code() {
         let code = "fn main() {\n    let x = 42;\n}";
-        assert!(is_code(code), "Actual Rust code should be classified as code");
+        assert!(
+            is_code(code),
+            "Actual Rust code should be classified as code"
+        );
     }
 
     // FINDING #2: is_cjk() now covers Japanese kana
@@ -390,7 +426,10 @@ mod tests {
     #[test]
     fn test_is_technical_false_positive_prose() {
         let prose = "She said \"hello\" to everyone.\nIt was nice.\nThe API worked.";
-        assert!(!is_technical(prose), "Normal prose should not be classified as technical");
+        assert!(
+            !is_technical(prose),
+            "Normal prose should not be classified as technical"
+        );
     }
 
     #[test]
@@ -414,7 +453,11 @@ mod tests {
         };
         let tokens = estimate_tokens(&msg);
         assert!(tokens > 0, "Image should have non-zero token estimate");
-        assert!(tokens < 10000, "Image token estimate should be reasonable, got {}", tokens);
+        assert!(
+            tokens < 10000,
+            "Image token estimate should be reasonable, got {}",
+            tokens
+        );
     }
 
     #[test]
@@ -436,7 +479,10 @@ mod tests {
     #[test]
     fn test_has_structural_patterns_markdown_not_code() {
         let markdown = "Here is a list:\n\n    - Item one\n    - Item two\n    - Item three\n\nAnd some more text.";
-        assert!(!is_code(markdown), "Markdown with 4-space indented list items should not be classified as code");
+        assert!(
+            !is_code(markdown),
+            "Markdown with 4-space indented list items should not be classified as code"
+        );
     }
 
     // FINDING: has_structural_patterns `;\n` false positive on prose
@@ -445,7 +491,8 @@ mod tests {
         // Prose sentences can have semicolons ending a clause before a newline.
         // ";\n" is not exclusive to code — it appears in natural language too.
         let prose = "done;\nhowever, other things happen next.";
-        assert!(!has_structural_patterns(prose),
+        assert!(
+            !has_structural_patterns(prose),
             "Prose with semicolon-before-newline should not trigger structural code detection: {:?}",
             prose
         );
@@ -457,9 +504,90 @@ mod tests {
         // Text with 3+ lines of 4-space indentation should be detected as structural.
         // This verifies the filter().take(3).count() >= 3 logic (or its nth(2) refactor).
         let indented = "let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;";
-        assert!(has_structural_patterns(indented),
+        assert!(
+            has_structural_patterns(indented),
             "Text with 3+ indented lines should be detected as having structural patterns"
         );
     }
 
+    // FINDING #10: Token accounting overflow — saturating arithmetic
+
+    fn user_msg(text: &str) -> Message {
+        text_message(text)
+    }
+
+    fn assistant_msg(text: &str) -> Message {
+        Message {
+            role: Role::Assistant,
+            content: Some(MessageContent::Text(text.to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn test_sum_tokens_saturating_normal() {
+        let values = vec![100u32, 200, 300];
+        assert_eq!(sum_tokens_saturating(values.into_iter()), 600);
+    }
+
+    #[test]
+    fn test_sum_tokens_saturating_overflow() {
+        // u32::MAX + 1 should saturate to u32::MAX, not wrap or panic.
+        let values = vec![u32::MAX, 1u32];
+        assert_eq!(sum_tokens_saturating(values.into_iter()), u32::MAX);
+    }
+
+    #[test]
+    fn test_sum_tokens_saturating_empty() {
+        let values: Vec<u32> = vec![];
+        assert_eq!(sum_tokens_saturating(values.into_iter()), 0);
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_no_overflow_large_usage() {
+        // usage.total_tokens near u32::MAX should not overflow when adding trailing tokens.
+        let messages = vec![
+            user_msg("hello"),
+            assistant_msg("world"),
+            user_msg("trailing"),
+        ];
+        let usage = Usage {
+            prompt_tokens: u32::MAX - 10,
+            completion_tokens: 5,
+            total_tokens: u32::MAX - 10,
+        };
+        // Should NOT wrap around (i.e., result >= usage.total_tokens).
+        let result = estimate_context_tokens(&messages, Some(&usage));
+        assert!(result >= usage.total_tokens, "token count wrapped around: {result}");
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_saturates_at_max() {
+        // total_tokens = u32::MAX with trailing messages should saturate, not wrap.
+        let big_trailing = user_msg(&"x".repeat(100_000)); // ~25k tokens
+        let messages = vec![
+            user_msg("hello"),
+            assistant_msg("world"),
+            big_trailing,
+        ];
+        let usage = Usage {
+            prompt_tokens: u32::MAX,
+            completion_tokens: 0,
+            total_tokens: u32::MAX,
+        };
+        let result = estimate_context_tokens(&messages, Some(&usage));
+        assert_eq!(result, u32::MAX, "should saturate at u32::MAX");
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_heuristic_no_overflow() {
+        // Even without usage, many large messages should not overflow.
+        let big_msg = assistant_msg(&"x".repeat(1_000_000)); // ~250k tokens
+        let messages: Vec<Message> = (0..20).map(|_| big_msg.clone()).collect();
+        // 20 * 250k = 5M tokens — well under u32::MAX, but verify no panic.
+        let result = estimate_context_tokens(&messages, None);
+        assert!(result > 0);
+    }
 }

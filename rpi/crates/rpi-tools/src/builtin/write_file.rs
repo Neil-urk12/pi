@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use rpi_core::{PiError, Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Writes content to a file. Creates parent directories if they don't exist.
 pub struct WriteFileTool;

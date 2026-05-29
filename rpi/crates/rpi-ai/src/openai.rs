@@ -19,7 +19,7 @@ use rpi_core::{
     Usage,
 };
 
-use crate::streaming::{sse_stream, SseEvent};
+use crate::streaming::{SseEvent, sse_stream};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -189,12 +189,12 @@ fn openai_sse_to_chunks(
                 }
             };
 
-            let finish_reason = choice.finish_reason.as_deref().and_then(parse_finish_reason);
+            let finish_reason = choice
+                .finish_reason
+                .as_deref()
+                .and_then(parse_finish_reason);
 
-            let delta = choice
-                .delta
-                .as_ref()
-                .and_then(|d| d.content.clone());
+            let delta = choice.delta.as_ref().and_then(|d| d.content.clone());
 
             let tool_calls = choice
                 .delta
@@ -206,10 +206,7 @@ fn openai_sse_to_chunks(
                             index: tc.index,
                             id: tc.id.clone(),
                             name: tc.function.as_ref().and_then(|f| f.name.clone()),
-                            arguments_delta: tc
-                                .function
-                                .as_ref()
-                                .and_then(|f| f.arguments.clone()),
+                            arguments_delta: tc.function.as_ref().and_then(|f| f.arguments.clone()),
                         })
                         .collect()
                 })
@@ -334,7 +331,6 @@ struct OpenAiStreamChunk {
     usage: Option<OpenAiUsage>,
 }
 
-
 #[derive(Deserialize, Debug)]
 struct OpenAiStreamChoice {
     delta: Option<OpenAiDelta>,
@@ -396,7 +392,9 @@ fn build_request(
         },
         stream,
         stream_options: if stream {
-            Some(StreamOptions { include_usage: true })
+            Some(StreamOptions {
+                include_usage: true,
+            })
         } else {
             None
         },
@@ -452,14 +450,12 @@ fn content_to_openai_json(content: Option<&MessageContent>) -> Option<serde_json
                     ContentBlock::Text { text } => {
                         Some(serde_json::json!({"type": "text", "text": text}))
                     }
-                    ContentBlock::Image { media_type, data } => {
-                        Some(serde_json::json!({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": format!("data:{media_type};base64,{data}")
-                            }
-                        }))
-                    }
+                    ContentBlock::Image { media_type, data } => Some(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:{media_type};base64,{data}")
+                        }
+                    })),
                     // ToolUse/ToolResult are mapped via Message-level fields for OpenAI.
                     _ => None,
                 })
@@ -517,15 +513,18 @@ fn parse_full_response(resp: OpenAiResponse) -> Result<ChatResponse> {
         name: None,
     };
 
-    let usage = resp.usage.map(|u| Usage {
-        prompt_tokens: u.prompt_tokens,
-        completion_tokens: u.completion_tokens,
-        total_tokens: u.total_tokens,
-    }).unwrap_or(Usage {
-        prompt_tokens: 0,
-        completion_tokens: 0,
-        total_tokens: 0,
-    });
+    let usage = resp
+        .usage
+        .map(|u| Usage {
+            prompt_tokens: u.prompt_tokens,
+            completion_tokens: u.completion_tokens,
+            total_tokens: u.total_tokens,
+        })
+        .unwrap_or(Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+        });
 
     Ok(ChatResponse {
         message,

@@ -42,6 +42,10 @@ pub enum PiError {
         /// Token limit.
         limit: u32,
     },
+
+    /// Compaction accounting errors.
+    #[error("compaction error: {0}")]
+    Compaction(String),
 }
 
 /// Convenience alias for `Result<T, PiError>`.

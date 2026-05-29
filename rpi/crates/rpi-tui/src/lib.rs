@@ -152,7 +152,9 @@ impl FrameLine {
             return;
         }
 
-        if let Some(last) = self.spans.last_mut() && last.style == style {
+        if let Some(last) = self.spans.last_mut()
+            && last.style == style
+        {
             last.text.push_str(&text);
             return;
         }
@@ -600,7 +602,9 @@ impl TurnView {
 
 fn format_tool_line(status: &str, name: &str, summary: Option<&str>) -> String {
     match summary {
-        Some(summary) if !summary.is_empty() => format!("{status} {name}: {}", strip_control_chars(summary)),
+        Some(summary) if !summary.is_empty() => {
+            format!("{status} {name}: {}", strip_control_chars(summary))
+        }
         _ => format!("{status} {name}"),
     }
 }

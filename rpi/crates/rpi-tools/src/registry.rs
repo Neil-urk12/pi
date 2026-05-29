@@ -70,7 +70,10 @@ impl ToolRegistry {
 
     /// Return all registered tools as a Vec of references (for the agent loop).
     pub fn tools(&self) -> Vec<&dyn Tool> {
-        self.tools.values().map(|t| t.as_ref() as &dyn Tool).collect()
+        self.tools
+            .values()
+            .map(|t| t.as_ref() as &dyn Tool)
+            .collect()
     }
 
     /// Return the names of all registered tools.

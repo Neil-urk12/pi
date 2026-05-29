@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use rpi_core::{PiError, Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Default timeout for bash commands: 120 seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -23,10 +23,9 @@ impl Tool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "bash".to_string(),
-            description:
-                "Execute a bash command and return stdout and stderr. \
+            description: "Execute a bash command and return stdout and stderr. \
                  Use `timeout` to set a time limit in seconds (default 120, max 600)."
-                    .to_string(),
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {

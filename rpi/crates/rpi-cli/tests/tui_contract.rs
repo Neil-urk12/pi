@@ -14,7 +14,6 @@ fn validate_tui_mode_accepts_interactive_tui() {
     validate_tui_mode(true, true).unwrap();
 }
 
-
 #[test]
 fn safe_tool_summary_uses_builtin_allowlist() {
     assert_eq!(

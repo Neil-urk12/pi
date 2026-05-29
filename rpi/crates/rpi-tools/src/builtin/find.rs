@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use rpi_core::{PiError, Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::PathBuf;
 
 /// Find files matching a pattern.
@@ -46,9 +46,10 @@ impl Tool for FindTool {
     }
 
     async fn execute(&self, arguments: &Value) -> Result<String, PiError> {
-        let pattern = arguments["pattern"]
-            .as_str()
-            .ok_or_else(|| PiError::Tool { tool: "find".to_string(), message: "Missing required parameter: pattern".to_string() })?;
+        let pattern = arguments["pattern"].as_str().ok_or_else(|| PiError::Tool {
+            tool: "find".to_string(),
+            message: "Missing required parameter: pattern".to_string(),
+        })?;
 
         let search_dir = arguments["path"]
             .as_str()
@@ -67,7 +68,10 @@ impl Tool for FindTool {
         };
 
         let entries: Vec<String> = glob::glob(&glob_pattern)
-            .map_err(|e| PiError::Tool { tool: "find".to_string(), message: format!("Invalid glob pattern: {e}") })?
+            .map_err(|e| PiError::Tool {
+                tool: "find".to_string(),
+                message: format!("Invalid glob pattern: {e}"),
+            })?
             .filter_map(|entry| entry.ok())
             .filter(|path| path.is_file())
             .map(|path| {
@@ -103,10 +107,7 @@ mod tests {
         let tool = FindTool::new(dir.path().to_path_buf());
 
         // Find all .rs files
-        let result = tool
-            .execute(&json!({"pattern": "**/*.rs"}))
-            .await
-            .unwrap();
+        let result = tool.execute(&json!({"pattern": "**/*.rs"})).await.unwrap();
         assert!(result.contains("test.rs"));
         assert!(result.contains("lib.rs"));
         assert!(result.contains("src/main.rs"));

@@ -27,9 +27,7 @@ use crate::openai::OpenAiProvider;
 /// };
 /// let provider = create_provider(&config)?;
 /// ```
-pub fn create_provider(
-    config: &ProviderConfig,
-) -> anyhow::Result<Box<dyn rpi_core::Provider>> {
+pub fn create_provider(config: &ProviderConfig) -> anyhow::Result<Box<dyn rpi_core::Provider>> {
     match config {
         ProviderConfig::OpenAi { api_key, base_url } => {
             let provider = match base_url {

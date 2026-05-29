@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use rpi_core::{PiError, Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Reads a file and returns its contents with line numbers.
 ///
@@ -116,7 +116,10 @@ impl Tool for ReadFileTool {
         let total = lines.len();
 
         if offset > total {
-            return Ok(format!("// file '{}' has {} lines — offset {} is past the end", path, total, offset));
+            return Ok(format!(
+                "// file '{}' has {} lines — offset {} is past the end",
+                path, total, offset
+            ));
         }
 
         let start = offset - 1; // convert to 0-indexed

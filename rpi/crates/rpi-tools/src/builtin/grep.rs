@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use regex::Regex;
 use rpi_core::{PiError, Tool, ToolDefinition};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::Path;
 
 /// Maximum number of matches to return.
@@ -25,11 +25,10 @@ impl Tool for GrepTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "grep".to_string(),
-            description:
-                "Search for a regex pattern across files in a directory. \
+            description: "Search for a regex pattern across files in a directory. \
                  Returns matching lines with file paths and line numbers. \
                  Use `context` to show surrounding lines."
-                    .to_string(),
+                .to_string(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -184,12 +183,7 @@ impl GrepTool {
             let full = if p.starts_with('/') {
                 p.to_string()
             } else {
-                format!(
-                    "{}{}{}",
-                    root.display(),
-                    std::path::MAIN_SEPARATOR,
-                    p
-                )
+                format!("{}{}{}", root.display(), std::path::MAIN_SEPARATOR, p)
             };
             glob::Pattern::new(&full).map(|pattern| (pattern, full))
         });
@@ -210,7 +204,11 @@ impl GrepTool {
             Some(Err(e)) => {
                 return Err(PiError::Tool {
                     tool: "grep".to_string(),
-                    message: format!("invalid glob pattern '{}': {}", glob_pattern.unwrap_or(""), e),
+                    message: format!(
+                        "invalid glob pattern '{}': {}",
+                        glob_pattern.unwrap_or(""),
+                        e
+                    ),
                 });
             }
             None => {

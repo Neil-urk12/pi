@@ -56,7 +56,11 @@ pub fn format_tool_result_for_display(result: &str, is_error: bool) -> String {
     } else {
         // Truncate long results for display
         let truncated = if result.len() > 500 {
-            let end = result.char_indices().nth(500).map(|(i, _)| i).unwrap_or(result.len());
+            let end = result
+                .char_indices()
+                .nth(500)
+                .map(|(i, _)| i)
+                .unwrap_or(result.len());
             format!("{}...(truncated)", &result[..end])
         } else {
             result.to_string()
