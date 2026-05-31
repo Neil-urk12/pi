@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::types::{ContentBlock, Message, MessageContent, Model, ModelInputKind, Role, ToolCall};
+use std::borrow::Cow;
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str =
@@ -10,7 +11,7 @@ const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str =
 const SYNTHETIC_TOOL_RESULT_TEXT: &str = "No result provided";
 
 /// Callback used to normalize provider-specific tool call identifiers.
-pub type ToolCallIdNormalizer = dyn Fn(&str, &Message) -> String;
+pub type ToolCallIdNormalizer = dyn Fn(&str, &Message) -> String + Send + Sync;
 
 /// Normalize messages before provider-specific wire-format conversion.
 ///
@@ -48,40 +49,42 @@ pub fn normalize_messages_with_input(
     synthesize_missing_tool_results(&transformed)
 }
 
-fn downgrade_unsupported_images(messages: &[Message], input: &[ModelInputKind]) -> Vec<Message> {
+fn downgrade_unsupported_images<'a>(messages: &'a [Message], input: &[ModelInputKind]) -> Cow<'a, [Message]> {
     if input.contains(&ModelInputKind::Image) {
-        return messages.to_vec();
+        return Cow::Borrowed(messages);
     }
 
     if !messages.iter().any(|m| {
         matches!(&m.content, Some(MessageContent::Blocks(blocks)) if blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })))
     }) {
-        return messages.to_vec();
+        return Cow::Borrowed(messages);
     }
 
-    messages
-        .iter()
-        .map(|message| {
-            let placeholder = match message.role {
-                Role::User => Some(NON_VISION_USER_IMAGE_PLACEHOLDER),
-                Role::Tool => Some(NON_VISION_TOOL_IMAGE_PLACEHOLDER),
-                _ => None,
-            };
-            let Some(placeholder) = placeholder else {
-                return message.clone();
-            };
-            let Some(MessageContent::Blocks(blocks)) = &message.content else {
-                return message.clone();
-            };
+    Cow::Owned(
+        messages
+            .iter()
+            .map(|message| {
+                let placeholder = match message.role {
+                    Role::User => Some(NON_VISION_USER_IMAGE_PLACEHOLDER),
+                    Role::Tool => Some(NON_VISION_TOOL_IMAGE_PLACEHOLDER),
+                    _ => None,
+                };
+                let Some(placeholder) = placeholder else {
+                    return message.clone();
+                };
+                let Some(MessageContent::Blocks(blocks)) = &message.content else {
+                    return message.clone();
+                };
 
-            let mut normalized = message.clone();
-            normalized.content = Some(MessageContent::Blocks(replace_images_with_placeholder(
-                blocks,
-                placeholder,
-            )));
-            normalized
-        })
-        .collect()
+                let mut normalized = message.clone();
+                normalized.content = Some(MessageContent::Blocks(replace_images_with_placeholder(
+                    blocks,
+                    placeholder,
+                )));
+                normalized
+            })
+            .collect(),
+    )
 }
 
 fn replace_images_with_placeholder(

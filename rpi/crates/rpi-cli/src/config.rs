@@ -357,19 +357,57 @@ struct ConfigFileLock {
 }
 
 impl ConfigFileLock {
+    /// Maximum number of retries when a stale lock is cleaned up but re-creation
+    /// fails because another process won the race. Each retry sleeps briefly to
+    /// let the other process finish.
+    const MAX_RETRIES: u32 = 3;
+    const RETRY_DELAY: Duration = Duration::from_millis(50);
+
     fn acquire(config_path: &Path) -> Result<Self> {
         let path = Config::lock_path_for(config_path);
         Self::try_create(&path)
             .or_else(|e| {
                 if Self::is_stale(&path) {
-                    let _ = fs::remove_file(&path);
-                    Self::try_create(&path)
+                    Self::remove_stale_and_retry(&path, e)
                 } else {
                     Err(e)
                 }
             })
             .with_context(|| format!("Failed to acquire config lock at {}", path.display()))?;
         Ok(Self { path })
+    }
+
+    /// Remove a stale lock and try to create a new one, retrying up to
+    /// MAX_RETRIES times if another process wins the TOCTOU race between
+    /// `is_stale` check and `remove_file`/`try_create`.
+    fn remove_stale_and_retry(
+        path: &Path,
+        original_error: std::io::Error,
+    ) -> std::io::Result<std::fs::File> {
+        // Best-effort removal; ignore NotFound (another process already removed it).
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(original_error),
+        }
+
+        for attempt in 0..Self::MAX_RETRIES {
+            match Self::try_create(path) {
+                Ok(file) => return Ok(file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Another process created the lock. Check if it is stale again
+                    // before retrying, to avoid removing a legitimately held lock.
+                    if attempt + 1 < Self::MAX_RETRIES && Self::is_stale(path) {
+                        let _ = fs::remove_file(path);
+                        std::thread::sleep(Self::RETRY_DELAY);
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(original_error)
     }
 
     fn try_create(path: &Path) -> std::io::Result<std::fs::File> {

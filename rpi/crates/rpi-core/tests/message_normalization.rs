@@ -7,6 +7,12 @@ use rpi_core::{
 use serde_json::json;
 use std::collections::BTreeMap;
 
+fn assert_send_sync<T: Send + Sync + ?Sized>() {}
+
+#[test]
+fn tool_call_id_normalizer_is_send_and_sync() {
+    assert_send_sync::<rpi_core::ToolCallIdNormalizer>();
+}
 fn model_with_input(input: Vec<ModelInputKind>) -> Model {
     Model {
         id: ModelId::new("anthropic", "claude-sonnet"),

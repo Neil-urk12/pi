@@ -1285,6 +1285,7 @@ dependencies = [
  "thiserror",
  "tiktoken-rs",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

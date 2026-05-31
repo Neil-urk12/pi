@@ -100,7 +100,7 @@ where
             while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
                 let line = String::from_utf8_lossy(&buffer[..newline_pos]).into_owned();
                 let line = line.trim_end_matches('\r');
-                buffer = buffer[newline_pos + 1..].to_vec();
+                buffer.drain(..newline_pos + 1);
 
                 if line.is_empty() {
                     // Empty line signals the end of an event.

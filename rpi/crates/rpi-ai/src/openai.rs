@@ -257,69 +257,92 @@ fn detect_openai_compat(base_url: &str) -> OpenAiCompat {
 fn openai_sse_to_chunks(
     stream: impl Stream<Item = anyhow::Result<SseEvent>> + Send + 'static,
 ) -> impl Stream<Item = Result<StreamChunk>> + Send {
-    stream.map(|event_result| match event_result {
-        Err(e) => Err(PiError::provider(format!("SSE error: {e}"))),
-        Ok(event) => {
-            if event.is_done() {
-                return Ok(StreamChunk {
-                    delta: None,
-                    tool_calls: Vec::new(),
-                    finish_reason: None,
-                    usage: None,
-                });
-            }
+    use async_stream::stream;
 
-            let chunk: OpenAiStreamChunk = event
-                .json()
-                .map_err(|e| PiError::provider(format!("Failed to parse stream chunk: {e}")))?;
+    let mut inner = Box::pin(stream);
+    let mut seen_done = false;
 
-            let choice = match chunk.choices.first() {
-                Some(c) => c,
-                None => {
-                    return Ok(StreamChunk {
-                        delta: None,
-                        tool_calls: Vec::new(),
-                        finish_reason: None,
-                        usage: None,
+    stream! {
+        while let Some(event_result) = inner.next().await {
+            match event_result {
+                Err(e) => {
+                    yield Err(PiError::provider(format!("SSE error: {e}")));
+                    return;
+                }
+                Ok(event) => {
+                    if event.is_done() {
+                        seen_done = true;
+                        yield Ok(StreamChunk {
+                            delta: None,
+                            tool_calls: Vec::new(),
+                            finish_reason: None,
+                            usage: None,
+                        });
+                        continue;
+                    }
+
+                    let chunk: OpenAiStreamChunk = match event.json() {
+                        Ok(c) => c,
+                        Err(e) => {
+                            yield Err(PiError::provider(format!("Failed to parse stream chunk: {e}")));
+                            return;
+                        }
+                    };
+
+                    let choice = match chunk.choices.first() {
+                        Some(c) => c,
+                        None => {
+                            yield Ok(StreamChunk {
+                                delta: None,
+                                tool_calls: Vec::new(),
+                                finish_reason: None,
+                                usage: None,
+                            });
+                            continue;
+                        }
+                    };
+
+                    let finish_reason = choice
+                        .finish_reason
+                        .as_deref()
+                        .and_then(parse_finish_reason);
+
+                    let delta = choice.delta.as_ref().and_then(|d| d.content.clone());
+
+                    let tool_calls = choice
+                        .delta
+                        .as_ref()
+                        .and_then(|d| d.tool_calls.as_ref())
+                        .map(|tcs| {
+                            tcs.iter()
+                                .map(|tc| ToolCallDelta {
+                                    index: tc.index,
+                                    id: tc.id.clone(),
+                                    name: tc.function.as_ref().and_then(|f| f.name.clone()),
+                                    arguments_delta: tc.function.as_ref().and_then(|f| f.arguments.clone()),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    yield Ok(StreamChunk {
+                        delta,
+                        tool_calls,
+                        finish_reason,
+                        usage: chunk.usage.map(|u| Usage {
+                            prompt_tokens: u.prompt_tokens,
+                            completion_tokens: u.completion_tokens,
+                            total_tokens: u.total_tokens,
+                        }),
                     });
                 }
-            };
-
-            let finish_reason = choice
-                .finish_reason
-                .as_deref()
-                .and_then(parse_finish_reason);
-
-            let delta = choice.delta.as_ref().and_then(|d| d.content.clone());
-
-            let tool_calls = choice
-                .delta
-                .as_ref()
-                .and_then(|d| d.tool_calls.as_ref())
-                .map(|tcs| {
-                    tcs.iter()
-                        .map(|tc| ToolCallDelta {
-                            index: tc.index,
-                            id: tc.id.clone(),
-                            name: tc.function.as_ref().and_then(|f| f.name.clone()),
-                            arguments_delta: tc.function.as_ref().and_then(|f| f.arguments.clone()),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            Ok(StreamChunk {
-                delta,
-                tool_calls,
-                finish_reason,
-                usage: chunk.usage.map(|u| Usage {
-                    prompt_tokens: u.prompt_tokens,
-                    completion_tokens: u.completion_tokens,
-                    total_tokens: u.total_tokens,
-                }),
-            })
+            }
         }
-    })
+
+        if !seen_done {
+            yield Err(PiError::provider("OpenAI stream ended before [DONE]"));
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1016,5 +1039,63 @@ mod tests {
         let compat_none = OpenAiCompat::default();
         let body = build_request("gpt-4o", &[], &[], &config, false, &compat_none);
         assert!(body.get("max_tokens").is_some(), "no compat should fall back to max_tokens");
+    }
+
+    #[tokio::test]
+    async fn stream_without_done_yields_error() {
+        use futures::stream;
+
+        let events = vec![
+            Ok(SseEvent {
+                event: None,
+                data: r#"{"id":"chatcmpl-1","choices":[{"delta":{"content":"hello"}}]}"#.to_string(),
+                id: None,
+            }),
+            Ok(SseEvent {
+                event: None,
+                data: r#"{"id":"chatcmpl-1","choices":[{"delta":{"content":" world"}}]}"#.to_string(),
+                id: None,
+            }),
+        ];
+
+        let sse_stream = stream::iter(events);
+        let chunk_stream = openai_sse_to_chunks(sse_stream);
+        let results: Vec<_> = chunk_stream.collect().await;
+
+        let has_incomplete_error = results.iter().any(|r| match r {
+            Err(e) => e.to_string().contains("ended before [DONE]"),
+            _ => false,
+        });
+        assert!(
+            has_incomplete_error,
+            "expected error about stream ending before [DONE], got: {results:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_with_done_does_not_yield_error() {
+        use futures::stream;
+
+        let events = vec![
+            Ok(SseEvent {
+                event: None,
+                data: r#"{"id":"chatcmpl-1","choices":[{"delta":{"content":"hi"}}]}"#.to_string(),
+                id: None,
+            }),
+            Ok(SseEvent {
+                event: None,
+                data: "[DONE]".to_string(),
+                id: None,
+            }),
+        ];
+
+        let sse_stream = stream::iter(events);
+        let chunk_stream = openai_sse_to_chunks(sse_stream);
+        let results: Vec<_> = chunk_stream.collect().await;
+
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "expected no errors, got: {results:?}"
+        );
     }
 }

@@ -32,6 +32,8 @@ futures = { workspace = true }
 # Token estimation
 tiktoken-rs = { workspace = true }
 
+# Logging
+tracing = { workspace = true }
 # File system
 dirs = { workspace = true }
 

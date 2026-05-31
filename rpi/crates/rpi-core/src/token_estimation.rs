@@ -202,8 +202,10 @@ pub fn estimate_tokens(message: &Message) -> u32 {
 
 /// Estimate token count for a single message using a provider/model-specific strategy.
 pub fn estimate_tokens_for_provider_model(provider: &str, model: &str, message: &Message) -> u32 {
-    try_estimate_tokens_with_tiktoken(provider, model, message)
-        .unwrap_or_else(|| estimate_tokens(message))
+    try_estimate_tokens_with_tiktoken(provider, model, message).unwrap_or_else(|| {
+        tracing::debug!(provider, model, "tiktoken unavailable, using char heuristic");
+        estimate_tokens(message)
+    })
 }
 
 /// Estimate total context tokens for a set of messages.
@@ -255,8 +257,10 @@ fn estimate_context_without_usage_for_provider_model(
     model: &str,
     messages: &[Message],
 ) -> u32 {
-    try_estimate_context_with_tiktoken(provider, model, messages)
-        .unwrap_or_else(|| estimate_context_tokens(messages, None))
+    try_estimate_context_with_tiktoken(provider, model, messages).unwrap_or_else(|| {
+        tracing::debug!(provider, model, "tiktoken unavailable, using char heuristic for context");
+        estimate_context_tokens(messages, None)
+    })
 }
 
 /// Sum token estimates with saturating arithmetic (no overflow panic).

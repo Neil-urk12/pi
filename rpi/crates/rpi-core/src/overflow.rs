@@ -100,6 +100,9 @@ fn is_known_non_overflow(lower: &str) -> bool {
         || lower.contains("rate limit")
         || lower.contains("too many requests")
         || lower.contains("request body")
+        || lower.contains("context switch")
+        || lower.contains("context deadline")
+        || lower.contains("context cancel")
 }
 
 fn contains_all(haystack: &str, needles: &[&str]) -> bool {

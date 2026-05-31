@@ -102,3 +102,52 @@ fn request_body_size_not_classified_as_overflow() {
         msg.error_message.unwrap()
     )));
 }
+
+#[test]
+fn context_switching_timeout_not_overflow() {
+    let msg = assistant_with_error("context switching timeout after 30 seconds");
+    assert!(!is_context_overflow_message(&msg, Some(200_000)));
+    assert!(!is_context_overflow_error(&PiError::provider(
+        msg.error_message.unwrap()
+    )));
+}
+
+#[test]
+fn context_deadline_exceeded_not_overflow() {
+    // Go-style context deadline error — not about token overflow
+    let msg = assistant_with_error("context deadline exceeded");
+    assert!(!is_context_overflow_message(&msg, Some(200_000)));
+    assert!(!is_context_overflow_error(&PiError::provider(
+        msg.error_message.unwrap()
+    )));
+}
+
+#[test]
+fn context_canceled_not_overflow() {
+    let msg = assistant_with_error("context canceled");
+    assert!(!is_context_overflow_message(&msg, Some(200_000)));
+}
+
+#[test]
+fn model_context_window_exceeded_is_overflow() {
+    let msg = assistant_with_error("model_context_window_exceeded");
+    assert!(is_context_overflow_message(&msg, Some(200_000)));
+    assert!(is_context_overflow_error(&PiError::provider(
+        msg.error_message.unwrap()
+    )));
+}
+
+#[test]
+fn prompt_too_long_for_model_is_overflow() {
+    let msg = assistant_with_error("prompt too long for model with 32k context");
+    assert!(is_context_overflow_message(&msg, Some(32_000)));
+    assert!(is_context_overflow_error(&PiError::provider(
+        msg.error_message.unwrap()
+    )));
+}
+
+#[test]
+fn context_length_exceeded_snake_case_is_overflow() {
+    let msg = assistant_with_error("context_length_exceeded");
+    assert!(is_context_overflow_message(&msg, Some(200_000)));
+}
