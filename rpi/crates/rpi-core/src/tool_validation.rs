@@ -282,18 +282,47 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
     let Some(schema) = schema_object(schema) else {
         return;
     };
+    // const keyword — exact equality
+    if let Some(const_val) = schema.get("const") {
+        if value != const_val {
+            errors.push(format!("{path}: const mismatch"));
+            return;
+        }
+    }
+
+    // enum keyword — value must be in allowed set
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        if !allowed.contains(value) {
+            errors.push(format!("{path}: value not in enum"));
+            return;
+        }
+    }
 
     for key in ["anyOf", "oneOf"] {
         if let Some(nested_schemas) = schema.get(key).and_then(Value::as_array) {
-            if nested_schemas.iter().any(|nested_schema| {
-                let mut nested_errors = Vec::new();
-                validate_value(value, nested_schema, path, &mut nested_errors);
-                nested_errors.is_empty()
-            }) {
+            let match_count = nested_schemas
+                .iter()
+                .filter(|nested_schema| {
+                    let mut nested_errors = Vec::new();
+                    validate_value(value, nested_schema, path, &mut nested_errors);
+                    nested_errors.is_empty()
+                })
+                .count();
+
+            if key == "oneOf" {
+                if match_count == 0 {
+                    errors.push(format!("{path}: did not match any oneOf schema"));
+                    return;
+                } else if match_count > 1 {
+                    errors.push(format!("{path}: matched multiple oneOf schemas"));
+                    return;
+                }
+            } else if match_count > 0 {
+                return;
+            } else {
+                errors.push(format!("{path}: did not match any {key} schema"));
                 return;
             }
-            errors.push(format!("{path}: did not match any {key} schema"));
-            return;
         }
     }
 
@@ -309,6 +338,33 @@ fn validate_value(value: &Value, schema: &Value, path: &str, errors: &mut Vec<St
 
     if let Some(array) = value.as_array() {
         validate_array(array, schema, path, errors);
+    }
+    // minLength / maxLength (string)
+    if let Some(s) = value.as_str() {
+        if let Some(min) = schema.get("minLength").and_then(Value::as_u64) {
+            if (s.chars().count() as u64) < min {
+                errors.push(format!("{path}: string shorter than minLength {min}"));
+            }
+        }
+        if let Some(max) = schema.get("maxLength").and_then(Value::as_u64) {
+            if (s.chars().count() as u64) > max {
+                errors.push(format!("{path}: string longer than maxLength {max}"));
+            }
+        }
+    }
+
+    // minimum / maximum (number)
+    if let Some(n) = value.as_f64() {
+        if let Some(min) = schema.get("minimum").and_then(Value::as_f64) {
+            if n < min {
+                errors.push(format!("{path}: number below minimum {min}"));
+            }
+        }
+        if let Some(max) = schema.get("maximum").and_then(Value::as_f64) {
+            if n > max {
+                errors.push(format!("{path}: number above maximum {max}"));
+            }
+        }
     }
 }
 
@@ -365,6 +421,18 @@ fn validate_array(
     path: &str,
     errors: &mut Vec<String>,
 ) {
+    // minItems / maxItems
+    if let Some(min) = schema.get("minItems").and_then(Value::as_u64) {
+        if (value.len() as u64) < min {
+            errors.push(format!("{path}: array shorter than minItems {min}"));
+        }
+    }
+    if let Some(max) = schema.get("maxItems").and_then(Value::as_u64) {
+        if (value.len() as u64) > max {
+            errors.push(format!("{path}: array longer than maxItems {max}"));
+        }
+    }
+
     let Some(items_schema) = schema.get("items") else {
         return;
     };

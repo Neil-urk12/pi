@@ -1184,3 +1184,352 @@ fn negative_integer_from_string() {
         json!(-42)
     );
 }
+
+// ====================================================================
+// enum keyword
+// ====================================================================
+
+#[test]
+fn enum_keyword_passes_matching_value() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "color": {"type": "string", "enum": ["a", "b", "c"]}
+        },
+        "required": ["color"]
+    }));
+    let result = validate_tool_arguments(&tool, &json!({"color": "a"})).unwrap();
+    assert_eq!(result["color"], json!("a"));
+}
+
+#[test]
+fn enum_keyword_rejects_non_matching_value() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "color": {"type": "string", "enum": ["a", "b", "c"]}
+        },
+        "required": ["color"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"color": "d"})).unwrap_err();
+    assert!(
+        err.to_string().contains("enum"),
+        "should mention enum constraint: {err}"
+    );
+}
+
+// ====================================================================
+// const keyword
+// ====================================================================
+
+#[test]
+fn const_keyword_passes_matching_value() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "mode": {"const": "fixed"}
+        },
+        "required": ["mode"]
+    }));
+    let result = validate_tool_arguments(&tool, &json!({"mode": "fixed"})).unwrap();
+    assert_eq!(result["mode"], json!("fixed"));
+}
+
+#[test]
+fn const_keyword_rejects_non_matching_value() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "mode": {"const": "fixed"}
+        },
+        "required": ["mode"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"mode": "other"})).unwrap_err();
+    assert!(
+        err.to_string().contains("const"),
+        "should mention const constraint: {err}"
+    );
+}
+
+// ====================================================================
+// minItems / maxItems keywords
+// ====================================================================
+
+#[test]
+fn min_items_passes_with_enough_elements() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+        },
+        "required": ["tags"]
+    }));
+    assert!(validate_tool_arguments(&tool, &json!({"tags": ["a"]})).is_ok());
+}
+
+#[test]
+fn min_items_rejects_too_few_elements() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+        },
+        "required": ["tags"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"tags": []})).unwrap_err();
+    assert!(
+        err.to_string().contains("minItems"),
+        "should mention minItems constraint: {err}"
+    );
+}
+
+#[test]
+fn max_items_passes_within_limit() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 3}
+        },
+        "required": ["tags"]
+    }));
+    assert!(validate_tool_arguments(&tool, &json!({"tags": ["a", "b", "c"]})).is_ok());
+}
+
+#[test]
+fn max_items_rejects_too_many_elements() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}, "maxItems": 3}
+        },
+        "required": ["tags"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"tags": ["a", "b", "c", "d"]})).unwrap_err();
+    assert!(
+        err.to_string().contains("maxItems"),
+        "should mention maxItems constraint: {err}"
+    );
+}
+
+#[test]
+fn min_max_items_passes_within_range() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3}
+        },
+        "required": ["tags"]
+    }));
+    assert!(validate_tool_arguments(&tool, &json!({"tags": ["a"]})).is_ok());
+    assert!(validate_tool_arguments(&tool, &json!({"tags": ["a", "b", "c"]})).is_ok());
+}
+
+// ====================================================================
+// minLength / maxLength keywords
+// ====================================================================
+
+#[test]
+fn min_length_passes_with_enough_chars() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 2}
+        },
+        "required": ["name"]
+    }));
+    assert!(validate_tool_arguments(&tool, &json!({"name": "ab"})).is_ok());
+}
+
+#[test]
+fn min_length_rejects_too_short() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 2}
+        },
+        "required": ["name"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"name": "a"})).unwrap_err();
+    assert!(
+        err.to_string().contains("minLength"),
+        "should mention minLength constraint: {err}"
+    );
+}
+
+#[test]
+fn max_length_passes_within_limit() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "maxLength": 5}
+        },
+        "required": ["name"]
+    }));
+    assert!(validate_tool_arguments(&tool, &json!({"name": "abcde"})).is_ok());
+}
+
+#[test]
+fn max_length_rejects_too_long() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "maxLength": 5}
+        },
+        "required": ["name"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"name": "abcdef"})).unwrap_err();
+    assert!(
+        err.to_string().contains("maxLength"),
+        "should mention maxLength constraint: {err}"
+    );
+}
+
+#[test]
+fn min_length_counts_chars_not_bytes() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "minLength": 4}
+        },
+        "required": ["name"]
+    }));
+    // "cafe" = 4 chars, 5 bytes — should pass minLength: 4
+    assert!(validate_tool_arguments(&tool, &json!({"name": "caf\u{00e9}"})).is_ok());
+    // "ab" = 2 chars — should fail minLength: 4
+    assert!(validate_tool_arguments(&tool, &json!({"name": "ab"})).is_err());
+}
+
+#[test]
+fn max_length_counts_chars_not_bytes() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "maxLength": 4}
+        },
+        "required": ["name"]
+    }));
+    // "cafe" = 4 chars, 5 bytes — should pass maxLength: 4
+    assert!(validate_tool_arguments(&tool, &json!({"name": "caf\u{00e9}"})).is_ok());
+    // "fiancee" = 7 chars — should fail maxLength: 4
+    assert!(validate_tool_arguments(&tool, &json!({"name": "fianc\u{00e9}e"})).is_err());
+}
+
+// ====================================================================
+// minimum / maximum keywords
+// ====================================================================
+
+#[test]
+fn minimum_passes_at_boundary() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "score": {"type": "number", "minimum": 0}
+        },
+        "required": ["score"]
+    }));
+    assert!(validate_tool_arguments(&tool, &json!({"score": 0})).is_ok());
+}
+
+#[test]
+fn minimum_rejects_below_boundary() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "score": {"type": "number", "minimum": 0}
+        },
+        "required": ["score"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"score": -1})).unwrap_err();
+    assert!(
+        err.to_string().contains("minimum"),
+        "should mention minimum constraint: {err}"
+    );
+}
+
+#[test]
+fn maximum_passes_at_boundary() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "score": {"type": "number", "maximum": 100}
+        },
+        "required": ["score"]
+    }));
+    assert!(validate_tool_arguments(&tool, &json!({"score": 100})).is_ok());
+}
+
+#[test]
+fn maximum_rejects_above_boundary() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "score": {"type": "number", "maximum": 100}
+        },
+        "required": ["score"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"score": 101})).unwrap_err();
+    assert!(
+        err.to_string().contains("maximum"),
+        "should mention maximum constraint: {err}"
+    );
+}
+
+#[test]
+fn min_max_passes_within_range() {
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "score": {"type": "number", "minimum": 0, "maximum": 100}
+        },
+        "required": ["score"]
+    }));
+    assert!(validate_tool_arguments(&tool, &json!({"score": 0})).is_ok());
+    assert!(validate_tool_arguments(&tool, &json!({"score": 50})).is_ok());
+    assert!(validate_tool_arguments(&tool, &json!({"score": 100})).is_ok());
+}
+
+// ====================================================================
+// oneOf uniqueness (UNIMPLEMENTED — oneOf behaves like anyOf)
+// ====================================================================
+
+#[test]
+fn oneof_rejects_when_multiple_branches_match() {
+    // Both branches are {"type": "string"}, so any string matches both.
+    // anyOf accepts (first match wins), but oneOf must reject (not exactly one match).
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "value": {
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "string"}
+                ]
+            }
+        },
+        "required": ["value"]
+    }));
+    let err = validate_tool_arguments(&tool, &json!({"value": "hello"})).unwrap_err();
+    assert!(
+        err.to_string().contains("oneOf"),
+        "oneOf must reject when multiple branches match: {err}"
+    );
+}
+
+#[test]
+fn anyof_accepts_when_multiple_branches_match() {
+    // Same schema as above but with anyOf — should pass.
+    let tool = make_tool(json!({
+        "type": "object",
+        "properties": {
+            "value": {
+                "anyOf": [
+                    {"type": "string"},
+                    {"type": "string"}
+                ]
+            }
+        },
+        "required": ["value"]
+    }));
+    let result = validate_tool_arguments(&tool, &json!({"value": "hello"})).unwrap();
+    assert_eq!(result["value"], json!("hello"));
+}

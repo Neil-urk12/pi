@@ -129,6 +129,15 @@ fn context_canceled_not_overflow() {
 }
 
 #[test]
+fn context_cancelled_british_spelling_not_overflow() {
+    let msg = assistant_with_error("context cancelled");
+    assert!(!is_context_overflow_message(&msg, Some(200_000)));
+    assert!(!is_context_overflow_error(&PiError::provider(
+        msg.error_message.unwrap()
+    )));
+}
+
+#[test]
 fn model_context_window_exceeded_is_overflow() {
     let msg = assistant_with_error("model_context_window_exceeded");
     assert!(is_context_overflow_message(&msg, Some(200_000)));

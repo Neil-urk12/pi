@@ -861,10 +861,13 @@ mod tests {
 
         // Create a stale lock file by setting its mtime to 60 seconds ago.
         fs::write(&lock_path, "stale").unwrap();
-        std::process::Command::new("touch")
-            .args(["-d", "60 seconds ago"])
-            .arg(&lock_path)
-            .status()
+        let stale_time = std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60));
+        std::fs::File::options()
+            .write(true)
+            .open(&lock_path)
+            .unwrap()
+            .set_times(stale_time)
             .unwrap();
 
         // acquire should succeed by removing the stale lock.
@@ -1005,5 +1008,86 @@ mod tests {
         let env = HashMap::new();
         let result = interpolate_env("price is $5", &env).unwrap();
         assert_eq!(result, "price is $5");
+    }
+
+    #[test]
+    fn acquire_removes_stale_lock_and_retries_on_toctou_contention() {
+        // Scenario: a stale lock exists. acquire() removes it, but another
+        // thread immediately recreates a *stale* lock (simulating another
+        // process that also left a stale lock, or won the TOCTOU race with a
+        // lock file whose mtime is in the past). The retry loop in
+        // remove_stale_and_retry should clean up the contention and eventually
+        // succeed once the blocker stops recreating.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let lock_path = Config::lock_path_for(&config_path);
+
+        // Create a stale lock file (mtime > 30s ago).
+        fs::write(&lock_path, "stale").unwrap();
+        std::process::Command::new("touch")
+            .args(["-d", "60 seconds ago"])
+            .arg(&lock_path)
+            .status()
+            .unwrap();
+
+        // Spawn a helper thread that waits for the stale lock to be removed,
+        // then creates one more stale lock to simulate contention, and stops.
+        let lock_path_clone = lock_path.clone();
+        let blocker = std::thread::spawn(move || {
+            // Busy-wait until the stale lock disappears (acquire removed it).
+            for _ in 0..200 {
+                if !lock_path_clone.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            // Create a stale lock to simulate winning the TOCTOU race.
+            fs::write(&lock_path_clone, "stale-contention").unwrap();
+            std::process::Command::new("touch")
+                .args(["-d", "60 seconds ago"])
+                .arg(&lock_path_clone)
+                .status()
+                .unwrap();
+            // Don't recreate after this — let the retry loop clean it up.
+        });
+
+        // acquire() should:
+        //   1. try_create fails (original stale lock exists)
+        //   2. is_stale -> true -> remove_stale_and_retry
+        //   3. Removes original stale lock
+        //   4. Loop iteration 0: try_create fails (blocker's stale lock)
+        //      -> is_stale -> true -> remove, sleep 50ms
+        //   5. Loop iteration 1: try_create -> succeeds (blocker stopped)
+        let lock = ConfigFileLock::acquire(&config_path).unwrap();
+        assert_eq!(lock.path, lock_path);
+        assert!(lock_path.exists());
+
+        drop(lock);
+        assert!(!lock_path.exists());
+
+        blocker.join().expect("blocker thread panicked");
+    }
+
+    #[test]
+    fn acquire_fails_on_non_stale_lock_without_retry() {
+        // Scenario: a non-stale (fresh) lock is held by another process.
+        // acquire() should fail immediately since the lock is not stale.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let lock_path = Config::lock_path_for(&config_path);
+
+        // Create a fresh lock file (just created, not stale).
+        fs::write(&lock_path, "held-by-other").unwrap();
+        assert!(lock_path.exists());
+
+        let err = ConfigFileLock::acquire(&config_path).unwrap_err();
+        assert!(
+            err.to_string().contains("config lock"),
+            "unexpected error: {err}"
+        );
+
+        // Lock file should still exist (we never removed it).
+        assert!(lock_path.exists());
+        fs::remove_file(&lock_path).unwrap();
     }
 }

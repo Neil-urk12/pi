@@ -548,3 +548,85 @@ async fn malformed_tool_arguments_handled() {
         "expected 'malformed' error, got: {content}"
     );
 }
+
+/// Multi-turn conversation: two sequential user messages produce two assistant
+/// replies, accumulating into a single messages vec with correct roles.
+#[tokio::test]
+async fn multi_turn_conversation_accumulates_messages() {
+    let provider = MockProvider::new("mock")
+        .with_chat_response(assistant_text_response("Hello!"))
+        .with_chat_response(assistant_text_response("Why did the chicken cross the road?"));
+
+    let mut messages = vec![user_msg("Hi")];
+    let config = AgentLoopConfig {
+        max_tool_rounds: 10,
+        stream: false,
+        compaction: None,
+    };
+    let mut events = Vec::new();
+
+    // Turn 1: user says "Hi", assistant replies "Hello!"
+    let result = rpi_core::run_agent_loop(
+        &provider,
+        "test-model",
+        &mut messages,
+        &[],
+        &config,
+        &agent_config(),
+        |e| events.push(e),
+    )
+    .await;
+    assert!(result.is_ok(), "turn 1 failed: {:?}", result.err());
+    assert_eq!(messages.len(), 2, "after turn 1: expected 2 messages");
+    assert_eq!(messages[0].role, Role::User);
+    assert_eq!(messages[1].role, Role::Assistant);
+
+    // Turn 2: user says "Tell me a joke", assistant replies with a joke.
+    messages.push(user_msg("Tell me a joke"));
+
+    let result = rpi_core::run_agent_loop(
+        &provider,
+        "test-model",
+        &mut messages,
+        &[],
+        &config,
+        &agent_config(),
+        |e| events.push(e),
+    )
+    .await;
+    assert!(result.is_ok(), "turn 2 failed: {:?}", result.err());
+
+    // Messages: user -> assistant -> user -> assistant
+    assert_eq!(messages.len(), 4, "after turn 2: expected 4 messages");
+    assert_eq!(messages[0].role, Role::User);
+    assert_eq!(messages[1].role, Role::Assistant);
+    assert_eq!(messages[2].role, Role::User);
+    assert_eq!(messages[3].role, Role::Assistant);
+
+    // Verify message content.
+    let content = |idx: usize| match messages[idx].content.as_ref().unwrap() {
+        MessageContent::Text(s) => s.as_str(),
+        _ => panic!("expected text content at index {idx}"),
+    };
+    assert_eq!(content(0), "Hi");
+    assert_eq!(content(1), "Hello!");
+    assert_eq!(content(2), "Tell me a joke");
+    assert_eq!(content(3), "Why did the chicken cross the road?");
+
+    // Two Done events, each reporting turns=1 (each call is one turn).
+    let done_count = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::Done { turns: 1, .. }))
+        .count();
+    assert_eq!(done_count, 2, "expected 2 Done events with turns=1");
+
+    // Two TurnStart/TurnEnd pairs.
+    let turn_starts: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TurnStart { turn } => Some(*turn),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(turn_starts, vec![0, 0], "each call emits TurnStart(0)");
+}
