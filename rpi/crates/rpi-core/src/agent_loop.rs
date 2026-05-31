@@ -145,7 +145,6 @@ pub async fn run_agent_loop(
     let tool_defs: Vec<ToolDefinition> = tools.iter().map(|t| t.definition()).collect();
 
     loop {
-
         on_event(AgentEvent::TurnStart { turn });
 
         // Call the provider — catch overflow errors for compaction retry.
@@ -195,12 +194,14 @@ pub async fn run_agent_loop(
                                 let existing =
                                     entry.arguments_delta.get_or_insert_with(String::new);
                                 existing.push_str(args);
-                                if let Some(id) = &entry.id {
-                                    on_event(AgentEvent::ToolCallDelta {
-                                        id: id.clone(),
-                                        arguments_delta: args.clone(),
-                                    });
-                                }
+                                let event_id = entry
+                                    .id
+                                    .clone()
+                                    .unwrap_or_else(|| format!("tool_call_{}", tc_delta.index));
+                                on_event(AgentEvent::ToolCallDelta {
+                                    id: event_id,
+                                    arguments_delta: args.clone(),
+                                });
                             }
                         }
                         last_finish_reason = chunk.finish_reason.clone();
@@ -253,11 +254,15 @@ pub async fn run_agent_loop(
 
                     messages.push(assistant_msg.clone());
                     let assistant_estimate =
-                        crate::token_estimation::estimate_tokens(&assistant_msg);
+                        crate::token_estimation::estimate_tokens_for_provider_model(
+                            provider.id(),
+                            model,
+                            &assistant_msg,
+                        );
                     on_event(AgentEvent::TurnEnd {
                         turn,
                         message: assistant_msg,
-                        usage: stream_usage.clone().or_else(|| {
+                        usage: stream_usage.clone().or({
                             Some(Usage {
                                 prompt_tokens: 0,
                                 completion_tokens: assistant_estimate,
@@ -267,14 +272,20 @@ pub async fn run_agent_loop(
                     });
 
                     // Update total usage — prefer actual API usage, fall back to heuristic.
-                    let turn_usage = stream_usage.take().unwrap_or_else(|| Usage {
+                    let turn_usage = stream_usage.take().unwrap_or(Usage {
                         prompt_tokens: 0,
                         completion_tokens: assistant_estimate,
                         total_tokens: assistant_estimate,
                     });
-                    total_usage.prompt_tokens = total_usage.prompt_tokens.saturating_add(turn_usage.prompt_tokens);
-                    total_usage.completion_tokens = total_usage.completion_tokens.saturating_add(turn_usage.completion_tokens);
-                    total_usage.total_tokens = total_usage.total_tokens.saturating_add(turn_usage.total_tokens);
+                    total_usage.prompt_tokens = total_usage
+                        .prompt_tokens
+                        .saturating_add(turn_usage.prompt_tokens);
+                    total_usage.completion_tokens = total_usage
+                        .completion_tokens
+                        .saturating_add(turn_usage.completion_tokens);
+                    total_usage.total_tokens = total_usage
+                        .total_tokens
+                        .saturating_add(turn_usage.total_tokens);
                     last_turn_usage = Some(turn_usage);
 
                     Ok(if has_tool_calls {
@@ -295,9 +306,15 @@ pub async fn run_agent_loop(
                     {
                         return Err(error);
                     }
-                    total_usage.prompt_tokens = total_usage.prompt_tokens.saturating_add(response.usage.prompt_tokens);
-                    total_usage.completion_tokens = total_usage.completion_tokens.saturating_add(response.usage.completion_tokens);
-                    total_usage.total_tokens = total_usage.total_tokens.saturating_add(response.usage.total_tokens);
+                    total_usage.prompt_tokens = total_usage
+                        .prompt_tokens
+                        .saturating_add(response.usage.prompt_tokens);
+                    total_usage.completion_tokens = total_usage
+                        .completion_tokens
+                        .saturating_add(response.usage.completion_tokens);
+                    total_usage.total_tokens = total_usage
+                        .total_tokens
+                        .saturating_add(response.usage.total_tokens);
                     last_turn_usage = Some(response.usage.clone());
 
                     let assistant_msg = response.message.clone();
@@ -326,7 +343,13 @@ pub async fn run_agent_loop(
                     error: "Context overflow detected, attempting compaction...".to_string(),
                 });
                 let overflow_tokens = crate::token_estimation::sum_tokens_saturating(
-                    messages.iter().map(crate::token_estimation::estimate_tokens)
+                    messages.iter().map(|message| {
+                        crate::token_estimation::estimate_tokens_for_provider_model(
+                            provider.id(),
+                            model,
+                            message,
+                        )
+                    }),
                 );
                 compaction_retries += 1;
                 if compaction_retries <= 2 {
@@ -389,23 +412,68 @@ pub async fn run_agent_loop(
 
         // Execute tool calls
         for tool_call in &tool_calls {
-            let args: serde_json::Value =
-                serde_json::from_str(&tool_call.function.arguments).unwrap_or_default();
-
-            on_event(AgentEvent::ToolExecutionStart {
-                id: tool_call.id.clone(),
-                name: tool_call.function.name.clone(),
-                arguments: args.clone(),
-            });
+            let raw_args: serde_json::Value =
+                match serde_json::from_str(&tool_call.function.arguments) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let error_text = format!(
+                            "Error: malformed tool arguments for '{}': {e}",
+                            tool_call.function.name
+                        );
+                        on_event(AgentEvent::ToolExecutionStart {
+                            id: tool_call.id.clone(),
+                            name: tool_call.function.name.clone(),
+                            arguments: serde_json::Value::String(
+                                tool_call.function.arguments.clone(),
+                            ),
+                        });
+                        on_event(AgentEvent::ToolExecutionEnd {
+                            id: tool_call.id.clone(),
+                            name: tool_call.function.name.clone(),
+                            result: error_text.clone(),
+                            is_error: true,
+                        });
+                        messages.push(Message {
+                            role: Role::Tool,
+                            content: Some(MessageContent::Text(error_text)),
+                            tool_calls: None,
+                            tool_call_id: Some(tool_call.id.clone()),
+                            name: Some(tool_call.function.name.clone()),
+                        });
+                        continue;
+                    }
+                };
 
             let tool = tools.iter().find(|t| t.name() == tool_call.function.name);
 
             let (result_text, is_error) = if let Some(tool) = tool {
-                match tool.execute(&args).await {
-                    Ok(text) => (text, false),
-                    Err(e) => (format!("Error: {e}"), true),
+                match crate::tool_validation::validate_tool_call(&tool_defs, tool_call) {
+                    Ok(args) => {
+                        on_event(AgentEvent::ToolExecutionStart {
+                            id: tool_call.id.clone(),
+                            name: tool_call.function.name.clone(),
+                            arguments: args.clone(),
+                        });
+                        match tool.execute(&args).await {
+                            Ok(text) => (text, false),
+                            Err(e) => (format!("Error: {e}"), true),
+                        }
+                    }
+                    Err(e) => {
+                        on_event(AgentEvent::ToolExecutionStart {
+                            id: tool_call.id.clone(),
+                            name: tool_call.function.name.clone(),
+                            arguments: raw_args.clone(),
+                        });
+                        (format!("Error: {e}"), true)
+                    }
                 }
             } else {
+                on_event(AgentEvent::ToolExecutionStart {
+                    id: tool_call.id.clone(),
+                    name: tool_call.function.name.clone(),
+                    arguments: raw_args.clone(),
+                });
                 (
                     format!("Error: Unknown tool '{}'", tool_call.function.name),
                     true,
@@ -434,10 +502,13 @@ pub async fn run_agent_loop(
         // estimate_context_tokens is significantly more accurate when API usage is available.
         // For typical sessions (hundreds of messages), the O(n) walk is negligible.
         if let Some(ref compaction_settings) = config.compaction {
-            let context_tokens = crate::token_estimation::estimate_context_tokens(
-                messages,
-                last_turn_usage.as_ref(),
-            );
+            let context_tokens =
+                crate::token_estimation::estimate_context_tokens_for_provider_model(
+                    provider.id(),
+                    model,
+                    messages,
+                    last_turn_usage.as_ref(),
+                );
             if crate::compaction::should_compact(
                 context_tokens,
                 context_window,
@@ -460,43 +531,17 @@ pub async fn run_agent_loop(
 
 fn finish_reason_error(reason: &Option<FinishReason>) -> Option<PiError> {
     match reason {
-        Some(FinishReason::Length) => Some(PiError::Provider(
-            "Response hit max tokens before completion".to_string(),
-        )),
-        Some(FinishReason::ContentFilter) => {
-            Some(PiError::Provider("Content filtered by model".to_string()))
-        }
+        Some(FinishReason::Length) =>
+            Some(PiError::provider("Response hit max tokens before completion")),
+        Some(FinishReason::ContentFilter) =>
+            Some(PiError::provider("Content filtered by model")),
         _ => None,
     }
 }
 
 /// Check if an error indicates context window overflow.
 fn is_context_overflow(error: &PiError) -> bool {
-    match error {
-        PiError::Provider(msg) => {
-            let lower = msg.to_lowercase();
-            // Primary: must contain "context" + a size/limit indicator.
-            // This eliminates false positives from rate limits, API quotas, body size limits.
-            if lower.contains("context") {
-                return lower.contains("length")
-                    || lower.contains("window")
-                    || lower.contains("exceeded")
-                    || lower.contains("too long")
-                    || lower.contains("too many tokens")
-                    || lower.contains("token limit")
-                    || lower.contains("too large")
-                    || lower.contains("input is too long")
-                    || lower.contains("message too long");
-            }
-            // Secondary: specific provider phrases that don't use "context"
-            // but are unambiguous overflow signals.
-            lower.contains("maximum number of tokens allowed")
-                || lower.contains("input token count exceeds")
-                || lower.contains("exceeds maximum input tokens")
-                || (lower.contains("prompt") && lower.contains("too long"))
-        }
-        _ => false,
-    }
+    crate::overflow::is_context_overflow_error(error)
 }
 
 /// Attempt compaction. Returns true if compaction succeeded and messages were updated.
@@ -547,11 +592,10 @@ async fn try_compact(
             // index relative to the post-compaction array is 1.
             // We must NOT store the pre-compaction first_kept_message_index
             // because it becomes stale after the array is transformed.
-            *compaction_state = Some((
-                1,
-                compaction_result.summary.clone(),
-            ));
-            on_event(AgentEvent::CompactionComplete { result: compaction_result.clone() });
+            *compaction_state = Some((1, compaction_result.summary.clone()));
+            on_event(AgentEvent::CompactionComplete {
+                result: compaction_result.clone(),
+            });
             true
         }
         Err(e) => {
@@ -594,41 +638,42 @@ mod tests {
     use super::*;
     use crate::compaction::CompactionResult;
     use crate::traits::{ChatStream, StreamChunk};
+    use crate::error::ProviderError;
     use crate::types::ModelId;
     use async_trait::async_trait;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
     fn test_is_context_overflow_openai_format() {
         // OpenAI format: "context_length_exceeded"
-        let error = PiError::Provider("context_length_exceeded: ...".to_string());
+        let error = PiError::provider("context_length_exceeded: ...");
         assert!(is_context_overflow(&error));
     }
 
     #[test]
     fn test_is_context_overflow_anthropic_format() {
         // Anthropic format: "context window"
-        let error = PiError::Provider("context window exceeded".to_string());
+        let error = PiError::provider("context window exceeded");
         assert!(is_context_overflow(&error));
     }
 
     #[test]
     fn test_is_context_overflow_missing_patterns() {
         // "prompt is too long" matches via secondary pattern (no "context" needed)
-        let error = PiError::Provider("prompt is too long".to_string());
+        let error = PiError::provider("prompt is too long");
         assert!(
             is_context_overflow(&error),
             "'prompt is too long' should be detected as context overflow"
         );
 
         // Patterns that require "context" to be present
-        let error = PiError::Provider("context window: request too large".to_string());
+        let error = PiError::provider("context window: request too large");
         assert!(
             is_context_overflow(&error),
             "'request too large' with 'context' should match"
         );
 
-        let error = PiError::Provider("context_length_exceeded: max tokens exceeded".to_string());
+        let error = PiError::provider("context_length_exceeded: max tokens exceeded");
         assert!(
             is_context_overflow(&error),
             "'max tokens exceeded' with 'context' should match"
@@ -638,13 +683,13 @@ mod tests {
     #[test]
     fn test_is_context_overflow_false_positives() {
         // Non-overflow errors that shouldn't match
-        let error = PiError::Provider("Invalid API key".to_string());
+        let error = PiError::provider("Invalid API key");
         assert!(!is_context_overflow(&error));
 
-        let error = PiError::Provider("Rate limit exceeded".to_string());
+        let error = PiError::provider("Rate limit exceeded");
         assert!(!is_context_overflow(&error));
 
-        let error = PiError::Provider("Model not found".to_string());
+        let error = PiError::provider("Model not found");
         assert!(!is_context_overflow(&error));
     }
 
@@ -778,7 +823,7 @@ mod tests {
     // FINDING #11: is_context_overflow missing Google format
     #[test]
     fn test_is_context_overflow_google_format() {
-        let error = PiError::Provider("exceeds maximum input tokens".to_string());
+        let error = PiError::provider("exceeds maximum input tokens");
         assert!(
             is_context_overflow(&error),
             "Google's 'exceeds maximum input tokens' should be detected"
@@ -787,7 +832,7 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_google_format_2() {
-        let error = PiError::Provider("input token count exceeds the maximum".to_string());
+        let error = PiError::provider("input token count exceeds the maximum");
         assert!(
             is_context_overflow(&error),
             "Google's 'input token count exceeds the maximum' should be detected"
@@ -849,9 +894,7 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_false_positive_rate_limit() {
-        let error = PiError::Provider(
-            "Rate limit exceeded. Too many requests, please retry after 60 seconds.".to_string(),
-        );
+        let error = PiError::provider("Rate limit exceeded. Too many requests, please retry after 60 seconds.");
         assert!(
             !is_context_overflow(&error),
             "Rate limit error should NOT be detected as context overflow"
@@ -860,9 +903,8 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_false_positive_generic_token_mention() {
-        let error = PiError::Provider(
-            "The token limit for this API key has been reached. Please upgrade.".to_string(),
-        );
+        let error: PiError =
+            PiError::provider("The token limit for this API key has been reached. Please upgrade.");
         assert!(
             !is_context_overflow(&error),
             "API key token limit error should NOT be detected as context overflow"
@@ -872,7 +914,7 @@ mod tests {
     #[test]
     fn test_is_context_overflow_false_positive_request_body_too_large() {
         let error =
-            PiError::Provider("Request body too large. Maximum allowed size is 10MB.".to_string());
+            PiError::provider("Request body too large. Maximum allowed size is 10MB.");
         assert!(
             !is_context_overflow(&error),
             "Request body size limit should NOT be context overflow"
@@ -881,18 +923,16 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_true_positive_openai_verbose() {
-        let error = PiError::Provider(
+        let error = PiError::provider(
             "This model's maximum context length is 128000 tokens. \
-             However, your messages resulted in 150000 tokens."
-                .to_string(),
+             However, your messages resulted in 150000 tokens.",
         );
         assert!(is_context_overflow(&error), "OpenAI overflow must match");
     }
 
     #[test]
     fn test_is_context_overflow_true_positive_anthropic_verbose() {
-        let error =
-            PiError::Provider("prompt is too long: 200000 tokens > 180000 maximum".to_string());
+        let error = PiError::provider("prompt is too long: 200000 tokens > 180000 maximum");
         assert!(is_context_overflow(&error), "Anthropic overflow must match");
     }
 
@@ -901,7 +941,7 @@ mod tests {
     #[test]
     fn test_is_context_overflow_case_insensitive() {
         // Verify to_lowercase() works — uppercase error must still match
-        let error = PiError::Provider("CONTEXT_LENGTH_EXCEEDED".to_string());
+        let error = PiError::provider("CONTEXT_LENGTH_EXCEEDED");
         assert!(
             is_context_overflow(&error),
             "Uppercase context overflow must match"
@@ -910,7 +950,7 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_empty_message() {
-        let error = PiError::Provider("".to_string());
+        let error = PiError::provider("");
         assert!(
             !is_context_overflow(&error),
             "Empty error message must not match"
@@ -920,7 +960,7 @@ mod tests {
     #[test]
     fn test_is_context_overflow_too_long_without_context() {
         // "too long" without "context" should NOT match (no secondary pattern for it)
-        let error = PiError::Provider("Your request is too long for processing.".to_string());
+        let error = PiError::provider("Your request is too long for processing.");
         assert!(
             !is_context_overflow(&error),
             "'too long' without 'context' must not match"
@@ -930,7 +970,7 @@ mod tests {
     #[test]
     fn test_is_context_overflow_context_config_invalid() {
         // Contains "context" but no size/limit indicator
-        let error = PiError::Provider("context configuration invalid".to_string());
+        let error = PiError::provider("context configuration invalid");
         assert!(
             !is_context_overflow(&error),
             "Non-overflow context error must not match"
@@ -975,7 +1015,7 @@ mod tests {
             ) -> crate::error::Result<ChatResponse> {
                 let call = self.call_count.fetch_add(1, Ordering::SeqCst);
                 match call {
-                    0 | 3 | 6 => Err(PiError::Provider("context_length_exceeded".to_string())),
+                    0 | 3 | 6 => Err(PiError::provider("context_length_exceeded")),
                     1 | 4 | 7 => Ok(ChatResponse {
                         message: Message {
                             role: Role::Assistant,
@@ -1029,20 +1069,26 @@ mod tests {
                             name: None,
                         },
                         finish_reason: FinishReason::ToolCalls,
-                        usage: Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+                        usage: Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 5,
+                            total_tokens: 15,
+                        },
                     }),
                     9 => Ok(ChatResponse {
                         message: Message {
                             role: Role::Assistant,
-                            content: Some(MessageContent::Text(
-                                "after 3rd compaction".to_string(),
-                            )),
+                            content: Some(MessageContent::Text("after 3rd compaction".to_string())),
                             tool_calls: None,
                             tool_call_id: None,
                             name: None,
                         },
                         finish_reason: FinishReason::Stop,
-                        usage: Usage { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+                        usage: Usage {
+                            prompt_tokens: 10,
+                            completion_tokens: 5,
+                            total_tokens: 15,
+                        },
                     }),
                     other => panic!("Unexpected call #{other}"),
                 }
@@ -1319,7 +1365,7 @@ mod tests {
         assert!(
             matches!(
                 &result,
-                Err(PiError::Provider(message))
+                Err(PiError::Provider(ProviderError::Other { message }))
                     if message == "Response hit max tokens before completion"
             ),
             "Agent loop should reject truncated streaming responses, got: {result:?}"
@@ -1412,7 +1458,7 @@ mod tests {
         assert!(
             matches!(
                 &result,
-                Err(PiError::Provider(message))
+                Err(PiError::Provider(ProviderError::Other { message }))
                     if message == "Response hit max tokens before completion"
             ),
             "Agent loop should reject truncated non-streaming responses, got: {result:?}"
@@ -1421,6 +1467,168 @@ mod tests {
             messages.len(),
             1,
             "Partial assistant message must not be saved"
+        );
+    }
+
+    #[test]
+    fn test_tool_arguments_are_validated_and_coerced_before_execution() {
+        use std::sync::{Arc, Mutex};
+
+        struct ToolValidationProvider {
+            call_count: AtomicU32,
+        }
+
+        #[async_trait]
+        impl Provider for ToolValidationProvider {
+            fn id(&self) -> &str {
+                "tool-validation"
+            }
+
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatResponse> {
+                let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(ChatResponse {
+                        message: Message {
+                            role: Role::Assistant,
+                            content: None,
+                            tool_calls: Some(vec![ToolCall {
+                                id: "call_1".to_string(),
+                                function: FunctionCall {
+                                    name: "echo".to_string(),
+                                    arguments: serde_json::json!({ "count": "42" }).to_string(),
+                                },
+                            }]),
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        finish_reason: FinishReason::ToolCalls,
+                        usage: Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                        },
+                    }),
+                    1 => Ok(ChatResponse {
+                        message: Message {
+                            role: Role::Assistant,
+                            content: Some(MessageContent::Text("done".to_string())),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        finish_reason: FinishReason::Stop,
+                        usage: Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                        },
+                    }),
+                    other => panic!("Unexpected provider call #{other}"),
+                }
+            }
+
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatStream> {
+                panic!("chat_stream should not be called in non-streaming mode")
+            }
+        }
+
+        struct EchoTool {
+            calls: Arc<Mutex<Vec<serde_json::Value>>>,
+        }
+
+        #[async_trait]
+        impl Tool for EchoTool {
+            fn name(&self) -> &str {
+                "echo"
+            }
+
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: "echo".to_string(),
+                    description: "Echo tool".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "count": { "type": "number" }
+                        },
+                        "required": ["count"]
+                    }),
+                }
+            }
+
+            async fn execute(&self, args: &serde_json::Value) -> crate::error::Result<String> {
+                self.calls
+                    .lock()
+                    .expect("tool calls poisoned")
+                    .push(args.clone());
+                Ok("ok".to_string())
+            }
+        }
+
+        let provider = ToolValidationProvider {
+            call_count: AtomicU32::new(0),
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let tool = EchoTool {
+            calls: calls.clone(),
+        };
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("run echo".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        let config = AgentLoopConfig {
+            max_tool_rounds: 2,
+            stream: false,
+            compaction: None,
+        };
+        let agent_config = AgentConfig {
+            model: ModelId::new("mock", "mock-model"),
+            max_tokens: Some(1000),
+            temperature: Some(0.7),
+            system_prompt: None,
+            max_iterations: 10,
+        };
+
+        let mut events = Vec::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime
+            .block_on(run_agent_loop(
+                &provider,
+                "mock-model",
+                &mut messages,
+                &[&tool],
+                &config,
+                &agent_config,
+                |event| events.push(event),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            calls.lock().expect("tool calls poisoned").as_slice(),
+            [serde_json::json!({ "count": 42 })]
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolExecutionStart { arguments, .. }
+                    if *arguments == serde_json::json!({ "count": 42 })
+            )),
+            "ToolExecutionStart should use validated/coerced arguments"
         );
     }
 
@@ -1822,8 +2030,7 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_mistral_format() {
-        let error =
-            PiError::Provider("The model's maximum context length is 32768 tokens".to_string());
+        let error = PiError::provider("The model's maximum context length is 32768 tokens");
         assert!(
             is_context_overflow(&error),
             "Mistral format should be detected"
@@ -1832,7 +2039,7 @@ mod tests {
 
     #[test]
     fn test_is_context_overflow_cohere_format() {
-        let error = PiError::Provider("context: too many tokens for the model".to_string());
+        let error = PiError::provider("context: too many tokens for the model");
         assert!(
             is_context_overflow(&error),
             "Cohere format should be detected"
@@ -1842,19 +2049,17 @@ mod tests {
     #[test]
     fn test_is_context_overflow_ambiguous_rate_limit() {
         // Contains "context" and "exceeded" but is a rate limit
-        let error =
-            PiError::Provider("Request rate limit exceeded. Context: API quota.".to_string());
-        // Known false positive: 'context' + 'exceeded' matches.
+        let error = PiError::provider("Request rate limit exceeded. Context: API quota.");
         let matched = is_context_overflow(&error);
         assert!(
-            matched,
-            "Known false positive: 'context' + 'exceeded' matches rate limit errors."
+            !matched,
+            "Rate-limit errors should not be classified as context overflow."
         );
     }
 
     #[test]
     fn test_is_context_overflow_boundary_exact_match() {
-        let error = PiError::Provider("context window".to_string());
+        let error = PiError::provider("context window");
         assert!(
             is_context_overflow(&error),
             "'context window' alone should match"
@@ -1910,7 +2115,7 @@ mod tests {
         ) -> crate::error::Result<ChatResponse> {
             let call = self.call_count.fetch_add(1, Ordering::Relaxed);
             match call {
-                0 => Err(PiError::Provider("context_length_exceeded".to_string())),
+                0 => Err(PiError::provider("context_length_exceeded")),
                 1 => Ok(ChatResponse {
                     message: Message {
                         role: Role::Assistant,
@@ -2206,7 +2411,7 @@ mod tests {
 
     #[test]
     fn test_double_compaction_stale_vs_fixed_compaction_state() {
-        use crate::compaction::{prepare_compaction, CompactionSettings};
+        use crate::compaction::{CompactionSettings, prepare_compaction};
 
         // Create 10 messages, each ~2000 chars -> ~500 tokens.
         let big_text = "x".repeat(2000);
@@ -2229,13 +2434,18 @@ mod tests {
         let prep1 = prepare_compaction(&messages, &settings, None).unwrap();
         let stale_first_kept = prep1.first_kept_message_index;
         assert!(stale_first_kept > 0, "Should compact some messages");
-        assert!(stale_first_kept < messages.len(), "Should keep some messages");
+        assert!(
+            stale_first_kept < messages.len(),
+            "Should keep some messages"
+        );
 
         // Simulate apply_compaction: [summary, ...messages[stale_first_kept..]]
         let mut compacted: Vec<Message> = Vec::new();
         compacted.push(Message {
             role: Role::User,
-            content: Some(MessageContent::Text("<summary>old conversation</summary>".to_string())),
+            content: Some(MessageContent::Text(
+                "<summary>old conversation</summary>".to_string(),
+            )),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -2292,5 +2502,326 @@ mod tests {
             "Fixed compaction should include the summary message in to-summarize. \
              Got: {first_text}",
         );
+    }
+
+    // --- Bug: ToolCallDelta suppressed when entry.id is None ---
+
+    #[test]
+    fn test_tool_call_delta_emitted_without_id() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        // Streams tool call deltas where arguments arrive BEFORE the id.
+        // The agent loop must emit ToolCallDelta for every argument delta,
+        // even when entry.id is still None — using the index as fallback id.
+        struct DeltaNoIdProvider { call_count: AtomicU32 }
+
+        #[async_trait]
+        impl Provider for DeltaNoIdProvider {
+            fn id(&self) -> &str {
+                "delta-no-id"
+            }
+
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatResponse> {
+                panic!("chat should not be called in streaming mode")
+            }
+
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatStream> {
+                let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+                let stream = match call {
+                    0 => futures::stream::iter(vec![
+                        // Chunk 1: argument delta arrives with NO id
+                        Ok(StreamChunk {
+                            delta: None,
+                            tool_calls: vec![ToolCallDelta {
+                                index: 0,
+                                id: None,
+                                name: None,
+                                arguments_delta: Some("{\"a\":".to_string()),
+                            }],
+                            finish_reason: None,
+                            usage: None,
+                        }),
+                        // Chunk 2: id + name + remaining arguments arrive
+                        Ok(StreamChunk {
+                            delta: None,
+                            tool_calls: vec![ToolCallDelta {
+                                index: 0,
+                                id: Some("call_1".to_string()),
+                                name: Some("test_tool".to_string()),
+                                arguments_delta: Some("1}".to_string()),
+                            }],
+                            finish_reason: Some(FinishReason::Stop),
+                            usage: None,
+                        }),
+                    ])
+                    .boxed(),
+                    // Second call: no tool calls, just text
+                    _ => futures::stream::iter(vec![Ok(StreamChunk {
+                        delta: Some("done".to_string()),
+                        tool_calls: vec![],
+                        finish_reason: Some(FinishReason::Stop),
+                        usage: None,
+                    })])
+                    .boxed(),
+                };
+                Ok(Box::pin(stream))
+            }
+        }
+
+        struct TestTool;
+
+        #[async_trait]
+        impl Tool for TestTool {
+            fn name(&self) -> &str {
+                "test_tool"
+            }
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: "test_tool".to_string(),
+                    description: "test".to_string(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            async fn execute(&self, _args: &serde_json::Value) -> crate::error::Result<String> {
+                Ok("ok".to_string())
+            }
+        }
+
+        let provider = DeltaNoIdProvider { call_count: AtomicU32::new(0) };
+        let tool = TestTool;
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("run tool".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        let config = AgentLoopConfig {
+            max_tool_rounds: 2,
+            stream: true,
+            compaction: None,
+        };
+        let agent_config = AgentConfig {
+            model: ModelId::new("mock", "mock-model"),
+            max_tokens: Some(1000),
+            temperature: Some(0.7),
+            system_prompt: None,
+            max_iterations: 10,
+        };
+
+        let mut events = Vec::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(run_agent_loop(
+            &provider,
+            "mock-model",
+            &mut messages,
+            &[&tool],
+            &config,
+            &agent_config,
+            |event| events.push(event),
+        ));
+
+        assert!(result.is_ok(), "Agent loop failed: {result:?}");
+
+        let delta_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolCallDelta { .. }))
+            .collect();
+
+        // MUST have a ToolCallDelta for EACH argument chunk, including the first
+        // one that arrives before the id. With the bug: only 1 event (chunk 2 only),
+        // because chunk 1's delta is silently dropped when entry.id is None.
+        assert_eq!(
+            delta_events.len(),
+            2,
+            "Expected 2 ToolCallDelta events (one per argument chunk), got {}. \
+             If 1, the first chunk's arguments were silently dropped because \
+             entry.id was None.",
+            delta_events.len()
+        );
+    }
+
+    // --- Bug: malformed tool args silently become Null ---
+
+    #[test]
+    fn test_malformed_tool_args_error_propagation() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // Provider returns a tool call with malformed JSON arguments.
+        struct MalformedArgsProvider {
+            call_count: AtomicU32,
+        }
+
+        #[async_trait]
+        impl Provider for MalformedArgsProvider {
+            fn id(&self) -> &str {
+                "malformed-args"
+            }
+
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatResponse> {
+                let call = self.call_count.fetch_add(1, Ordering::SeqCst);
+                match call {
+                    0 => Ok(ChatResponse {
+                        message: Message {
+                            role: Role::Assistant,
+                            content: None,
+                            tool_calls: Some(vec![ToolCall {
+                                id: "call_1".to_string(),
+                                function: FunctionCall {
+                                    name: "echo".to_string(),
+                                    arguments: "{not valid json!!!}".to_string(),
+                                },
+                            }]),
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        finish_reason: FinishReason::ToolCalls,
+                        usage: Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                        },
+                    }),
+                    1 => Ok(ChatResponse {
+                        message: Message {
+                            role: Role::Assistant,
+                            content: Some(MessageContent::Text("done".to_string())),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        finish_reason: FinishReason::Stop,
+                        usage: Usage {
+                            prompt_tokens: 1,
+                            completion_tokens: 1,
+                            total_tokens: 2,
+                        },
+                    }),
+                    other => panic!("Unexpected provider call #{other}"),
+                }
+            }
+
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolDefinition],
+                _config: &AgentConfig,
+            ) -> crate::error::Result<ChatStream> {
+                panic!("chat_stream should not be called in non-streaming mode")
+            }
+        }
+
+        struct EchoTool;
+
+        #[async_trait]
+        impl Tool for EchoTool {
+            fn name(&self) -> &str {
+                "echo"
+            }
+            fn definition(&self) -> ToolDefinition {
+                ToolDefinition {
+                    name: "echo".to_string(),
+                    description: "Echo tool".to_string(),
+                    parameters: serde_json::json!({}),
+                }
+            }
+            async fn execute(&self, _args: &serde_json::Value) -> crate::error::Result<String> {
+                // Should never reach here with malformed args
+                Ok("should not be called".to_string())
+            }
+        }
+
+        let provider = MalformedArgsProvider {
+            call_count: AtomicU32::new(0),
+        };
+        let tool = EchoTool;
+        let mut messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("run echo".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+        let config = AgentLoopConfig {
+            max_tool_rounds: 2,
+            stream: false,
+            compaction: None,
+        };
+        let agent_config = AgentConfig {
+            model: ModelId::new("mock", "mock-model"),
+            max_tokens: Some(1000),
+            temperature: Some(0.7),
+            system_prompt: None,
+            max_iterations: 10,
+        };
+
+        let mut events = Vec::new();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(run_agent_loop(
+            &provider,
+            "mock-model",
+            &mut messages,
+            &[&tool],
+            &config,
+            &agent_config,
+            |event| events.push(event),
+        ));
+
+        // The loop should succeed (malformed args are a tool-level error, not fatal).
+        assert!(result.is_ok(), "Agent loop should handle malformed args gracefully: {result:?}");
+
+        // The tool should report an error via ToolExecutionEnd.
+        let tool_end = events.iter().find(|e| {
+            matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })
+        });
+        assert!(
+            tool_end.is_some(),
+            "Malformed JSON args must produce ToolExecutionEnd with is_error=true. \
+             With the bug, unwrap_or_default() silently converts to Null and the tool executes."
+        );
+
+        // The error message should mention the parse failure specifically.
+        // With unwrap_or_default(), the error comes from validate_tool_call which
+        // returns a generic Serialization error. The fix should produce a message
+        // that explicitly mentions "malformed" or "invalid" arguments.
+        if let Some(AgentEvent::ToolExecutionEnd { result, .. }) = tool_end {
+            assert!(
+                result.contains("malformed") || result.contains("invalid JSON"),
+                "Error message should explicitly mention malformed/invalid args, got: {result}"
+            );
+        }
+
+        // The ToolExecutionStart event should NOT have Null arguments.
+        // With unwrap_or_default(), the event reports arguments: Null.
+        // The fix should preserve the original malformed JSON or at least not silently Null it.
+        let tool_start = events.iter().find(|e| {
+            matches!(e, AgentEvent::ToolExecutionStart { name, .. } if name == "echo")
+        });
+        if let Some(AgentEvent::ToolExecutionStart { arguments, .. }) = tool_start {
+            assert_ne!(
+                *arguments,
+                serde_json::Value::Null,
+                "ToolExecutionStart arguments should not be Null for malformed JSON input. \
+                 With unwrap_or_default(), the original input is silently discarded."
+            );
+        }
     }
 }

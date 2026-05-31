@@ -2,8 +2,14 @@
 
 use async_trait::async_trait;
 
-use crate::error::Result;
-use crate::types::{AgentConfig, ChatResponse, Message, ToolDefinition, Usage};
+use crate::error::{ProviderError, Result};
+use crate::token_estimation::{
+    estimate_context_tokens, estimate_context_tokens_for_provider_model,
+};
+use crate::types::{
+    AgentConfig, ChatResponse, Message, ProviderMetadata, ProviderRequestConfig, ToolDefinition,
+    Usage,
+};
 
 /// A chunk streamed from a provider.
 #[derive(Debug, Clone)]
@@ -41,6 +47,47 @@ pub type ChatStream = std::pin::Pin<Box<dyn futures::Stream<Item = Result<Stream
 pub trait Provider: Send + Sync {
     /// The provider's identifier (e.g., "openai", "anthropic").
     fn id(&self) -> &str;
+
+    /// Return static metadata for this provider.
+    fn metadata(&self) -> ProviderMetadata {
+        ProviderMetadata::new(self.id())
+    }
+
+    /// Validate a provider request before sending it to the upstream API.
+    ///
+    /// Returns `Err(PiError::Provider(ProviderError::ContextOverflow { .. }))` if
+    /// the estimated token count exceeds the model's context window.
+    fn validate_context(
+        &self,
+        messages: &[Message],
+        request: &ProviderRequestConfig,
+    ) -> Result<()> {
+        let Some(context_window) = request.context_window else {
+            return Ok(());
+        };
+
+        let token_count = request.model.as_ref().map_or_else(
+            || estimate_context_tokens(messages, None),
+            |model| {
+                estimate_context_tokens_for_provider_model(
+                    &model.provider,
+                    &model.model,
+                    messages,
+                    None,
+                )
+            },
+        );
+
+        if token_count > context_window {
+            return Err(ProviderError::ContextOverflow {
+                token_count,
+                context_window,
+            }
+            .into());
+        }
+
+        Ok(())
+    }
 
     /// Send a chat completion request and get a full response.
     async fn chat(

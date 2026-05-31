@@ -3,6 +3,8 @@
 //! Provides a parser for SSE streams from HTTP responses, commonly used by
 //! LLM providers for streaming chat completions.
 
+use std::time::Duration;
+
 use futures::Stream;
 use futures::StreamExt;
 
@@ -40,12 +42,50 @@ impl SseEvent {
 pub fn sse_stream(
     response: reqwest::Response,
 ) -> impl Stream<Item = anyhow::Result<SseEvent>> + Send {
+    sse_events_from_byte_stream(response.bytes_stream(), None)
+}
+
+/// Convert a [`reqwest::Response`] into a stream of [`SseEvent`]s with an idle timeout.
+///
+/// The timeout is applied between incoming byte chunks. If no chunk arrives
+/// before `idle_timeout`, the stream yields an error and terminates.
+pub fn sse_stream_with_idle_timeout(
+    response: reqwest::Response,
+    idle_timeout: Duration,
+) -> impl Stream<Item = anyhow::Result<SseEvent>> + Send {
+    sse_events_from_byte_stream(response.bytes_stream(), Some(idle_timeout))
+}
+
+fn sse_events_from_byte_stream<B, E>(
+    byte_stream: impl Stream<Item = std::result::Result<B, E>> + Send + 'static,
+    idle_timeout: Option<Duration>,
+) -> impl Stream<Item = anyhow::Result<SseEvent>> + Send
+where
+    B: AsRef<[u8]> + Send + 'static,
+    E: std::fmt::Display + Send + Sync + 'static,
+{
     async_stream::stream! {
-        let mut byte_stream = response.bytes_stream();
-        let mut buffer = String::new();
+        futures::pin_mut!(byte_stream);
+        let mut buffer: Vec<u8> = Vec::new();
         let mut current_event = SseEvent::default();
 
-        while let Some(chunk_result) = byte_stream.next().await {
+        loop {
+            let next_chunk = if let Some(timeout) = idle_timeout {
+                match tokio::time::timeout(timeout, byte_stream.next()).await {
+                    Ok(next_chunk) => next_chunk,
+                    Err(_) => {
+                        yield Err(anyhow::anyhow!("SSE stream idle timeout after {}ms", timeout.as_millis()));
+                        return;
+                    }
+                }
+            } else {
+                byte_stream.next().await
+            };
+
+            let Some(chunk_result) = next_chunk else {
+                break;
+            };
+
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
@@ -54,15 +94,13 @@ pub fn sse_stream(
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.extend_from_slice(chunk.as_ref());
 
             // Process all complete lines in the buffer.
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].to_string();
-                buffer = buffer[newline_pos + 1..].to_string();
-
-                // Handle \r\n line endings.
+            while let Some(newline_pos) = buffer.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buffer[..newline_pos]).into_owned();
                 let line = line.trim_end_matches('\r');
+                buffer = buffer[newline_pos + 1..].to_vec();
 
                 if line.is_empty() {
                     // Empty line signals the end of an event.
@@ -92,5 +130,93 @@ pub fn sse_stream(
         if !current_event.data.is_empty() {
             yield Ok(current_event);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::time::Duration;
+
+    use futures::stream;
+
+    use super::*;
+
+    async fn collect_sse_events(
+        events: impl Stream<Item = anyhow::Result<SseEvent>>,
+    ) -> Vec<anyhow::Result<SseEvent>> {
+        futures::pin_mut!(events);
+        let mut results = Vec::new();
+        while let Some(event) = events.next().await {
+            results.push(event);
+        }
+        results
+    }
+
+    #[tokio::test]
+    async fn sse_events_from_byte_stream_preserves_event_id_and_multiline_data() {
+        let chunks = stream::iter(vec![Ok::<_, io::Error>(
+            b": comment\nretry: 1000\nevent: delta\nid: evt-1\ndata: {\"a\":1}\ndata: {\"b\":2}\n\n"
+                .to_vec(),
+        )]);
+
+        let results = collect_sse_events(sse_events_from_byte_stream(chunks, None)).await;
+
+        assert_eq!(results.len(), 1);
+        let event = results[0].as_ref().expect("event should parse");
+        assert_eq!(event.event.as_deref(), Some("delta"));
+        assert_eq!(event.id.as_deref(), Some("evt-1"));
+        assert_eq!(event.data, "{\"a\":1}\n{\"b\":2}");
+    }
+
+    #[tokio::test]
+    async fn sse_events_from_byte_stream_reports_read_errors() {
+        let chunks = stream::iter(vec![Err::<Vec<u8>, _>(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ))]);
+
+        let results = collect_sse_events(sse_events_from_byte_stream(chunks, None)).await;
+
+        assert_eq!(results.len(), 1);
+        let error = results[0]
+            .as_ref()
+            .expect_err("read error should propagate");
+        assert!(error.to_string().contains("SSE stream read error"));
+    }
+
+    #[tokio::test]
+    async fn sse_events_from_byte_stream_reports_idle_timeout() {
+        let chunks = stream::pending::<Result<Vec<u8>, io::Error>>();
+
+        let results = collect_sse_events(sse_events_from_byte_stream(
+            chunks,
+            Some(Duration::from_millis(1)),
+        ))
+        .await;
+
+        assert_eq!(results.len(), 1);
+        let error = results[0]
+            .as_ref()
+            .expect_err("idle timeout should fail the stream");
+        assert!(error.to_string().contains("SSE stream idle timeout"));
+    }
+
+    #[tokio::test]
+    async fn sse_events_from_byte_stream_handles_utf8_split_across_chunks() {
+        // Euro sign '€' is 3 bytes: E2 82 AC.
+        // Split so chunk 1 has first 2 bytes, chunk 2 has the last byte.
+        let chunks = stream::iter(vec![
+            Ok::<_, io::Error>(b"data: hello \xe2\x82".to_vec()),
+            Ok::<_, io::Error>(b"\xac world\n\n".to_vec()),
+        ]);
+
+        let results = collect_sse_events(sse_events_from_byte_stream(chunks, None)).await;
+
+        assert_eq!(results.len(), 1);
+        let event = results[0].as_ref().expect("event should parse");
+        assert_eq!(event.data, "hello \u{20ac} world");
+        // Must NOT contain replacement character U+FFFD
+        assert!(!event.data.contains('\u{fffd}'), "data contained U+FFFD: {:?}", event.data);
     }
 }

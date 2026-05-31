@@ -227,6 +227,7 @@ pub fn serialize_conversation(messages: &[Message]) -> String {
                 .iter()
                 .filter_map(|b| match b {
                     ContentBlock::Text { text } => Some(text.as_str()),
+                    ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
                     ContentBlock::ToolUse { .. } => None, // serialized via tool_calls
                     ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
                     ContentBlock::Image { .. } => None,
@@ -240,7 +241,7 @@ pub fn serialize_conversation(messages: &[Message]) -> String {
         let tool_info = if let Some(tool_calls) = &msg.tool_calls {
             let calls: Vec<String> = tool_calls
                 .iter()
-                .map(|tc| format!("{}({})", tc.function.name, tc.function.arguments))
+                .map(|tc| format!("{}([arguments omitted])", tc.function.name))
                 .collect();
             let joined = calls.join("\n");
             if text.is_empty() {
@@ -451,12 +452,13 @@ pub async fn compact(
         name: None,
     };
     let summarized_tokens: u32 = sum_tokens_saturating(
-        preparation.messages_to_summarize.iter().map(estimate_tokens),
+        preparation
+            .messages_to_summarize
+            .iter()
+            .map(estimate_tokens),
     );
     let prefix_tokens: u32 = if preparation.is_split_turn {
-        sum_tokens_saturating(
-            preparation.turn_prefix_messages.iter().map(estimate_tokens),
-        )
+        sum_tokens_saturating(preparation.turn_prefix_messages.iter().map(estimate_tokens))
     } else {
         0
     };
@@ -464,12 +466,13 @@ pub async fn compact(
         .checked_add(prefix_tokens)
         .unwrap_or(u32::MAX);
     if preparation.tokens_before < total_removed {
-        return Err(crate::error::PiError::Compaction(format!(
+        return Err(crate::error::CompactionError::new(format!(
             "tokens_before ({}) < removed_tokens ({}) — compaction accounting bug",
             preparation.tokens_before, total_removed,
-        )));
+        )).into());
     }
-    let tokens_after = (preparation.tokens_before - total_removed).saturating_add(estimate_tokens(&summary_msg));
+    let tokens_after =
+        (preparation.tokens_before - total_removed).saturating_add(estimate_tokens(&summary_msg));
 
     Ok(CompactionResult {
         summary,
@@ -663,7 +666,40 @@ mod tests {
         let messages = vec![assistant_tool_call("read_file", "{\"path\":\"/a\"}")];
         let text = serialize_conversation(&messages);
         assert!(text.contains("[Assistant tool calls]"));
-        assert!(text.contains("read_file({\"path\":\"/a\"})"));
+        // Tool name visible, arguments redacted.
+        assert!(text.contains("read_file"), "Tool name should remain visible");
+        assert!(!text.contains("\"path\":\"/a\""), "Arguments should be redacted");
+    }
+
+    #[test]
+    fn test_serialize_conversation_redacts_tool_arguments() {
+        // Tool call with a secret in arguments.
+        let messages = vec![assistant_tool_call(
+            "http_request",
+            r#"{"headers": {"Authorization": "Bearer sk-secret123"}}"#,
+        )];
+        let text = serialize_conversation(&messages);
+
+        // Tool name must be visible.
+        assert!(
+            text.contains("http_request"),
+            "Tool name should be visible in serialized output"
+        );
+        // Secret must NOT appear.
+        assert!(
+            !text.contains("sk-secret123"),
+            "Secret must not leak into summarization prompt"
+        );
+        // Arguments must be redacted (not raw JSON).
+        assert!(
+            !text.contains("Authorization"),
+            "Argument content must be redacted"
+        );
+        // Some indication arguments existed.
+        assert!(
+            text.contains("redacted") || text.contains("omitted") || text.contains("["),
+            "Should indicate arguments were present but redacted"
+        );
     }
 
     #[test]
@@ -703,7 +739,7 @@ mod tests {
         assert!(!prep.messages_to_summarize.is_empty());
         assert_eq!(
             prep.tokens_before,
-            messages.iter().map(|m| estimate_tokens(m)).sum::<u32>()
+            messages.iter().map(estimate_tokens).sum::<u32>()
         );
     }
 
@@ -735,7 +771,10 @@ mod tests {
             tool_result("result 3"),
         ];
         let result = find_cut_point(&messages, 1, None);
-        assert!(result.is_none(), "All-tool session is malformed — should return None");
+        assert!(
+            result.is_none(),
+            "All-tool session is malformed — should return None"
+        );
     }
 
     #[test]
@@ -878,11 +917,11 @@ mod tests {
             "compact should return error when tokens_before < summarized_tokens"
         );
         match result.unwrap_err() {
-            crate::error::PiError::Compaction(msg) => {
+            crate::error::PiError::Compaction(crate::error::CompactionError { message }) => {
                 assert!(
-                    msg.contains("tokens_before"),
+                    message.contains("tokens_before"),
                     "Error should mention tokens_before, got: {}",
-                    msg
+                    message
                 );
             }
             other => panic!("Expected Compaction error, got: {:?}", other),
@@ -1073,7 +1112,10 @@ mod tests {
             tool_result("output2"),
         ];
         let result = find_cut_point(&messages, 1, None);
-        assert!(result.is_some(), "Should find cut point for valid tool-use turns");
+        assert!(
+            result.is_some(),
+            "Should find cut point for valid tool-use turns"
+        );
         let (cut, is_split) = result.unwrap();
         // If cut lands on a Tool, the preceding Assistant must have tool_calls.
         if messages[cut].role == Role::Tool {
@@ -1088,7 +1130,10 @@ mod tests {
                     break;
                 }
             }
-            assert!(found_assistant, "Tool at cut must have a preceding Assistant with tool_calls");
+            assert!(
+                found_assistant,
+                "Tool at cut must have a preceding Assistant with tool_calls"
+            );
             assert!(is_split, "Cut on a valid Tool should set is_split");
         }
     }

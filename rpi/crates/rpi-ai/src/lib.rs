@@ -41,9 +41,23 @@
 #![warn(missing_docs)]
 
 pub mod anthropic;
+pub mod cloudflare;
 pub mod openai;
 pub mod provider;
 pub mod streaming;
 
 // Re-export the factory for convenience.
 pub use provider::create_provider;
+
+use std::time::Duration;
+
+/// Default HTTP client with conservative timeouts.
+pub(crate) fn default_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300))
+        .build()
+        // Safe: reqwest::Client::builder().build() only fails if the system TLS
+        // backend or DNS resolver is broken — a fatal, unrecoverable condition.
+        .expect("HTTP client builder")
+}

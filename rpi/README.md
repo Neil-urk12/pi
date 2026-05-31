@@ -11,6 +11,7 @@ rpi/
     ├── rpi-core/       # Core types, traits, agent loop
     ├── rpi-ai/         # LLM provider implementations
     ├── rpi-tools/      # Built-in tool implementations
+    ├── rpi-tui/        # Experimental terminal UI renderer
     └── rpi-cli/        # CLI entry point
 ```
 
@@ -21,8 +22,9 @@ rpi-cli
   ├── rpi-core
   ├── rpi-ai
   │   └── rpi-core
-  └── rpi-tools
-      └── rpi-core
+  ├── rpi-tools
+  │   └── rpi-core
+  └── rpi-tui
 ```
 
 ### Crate Descriptions
@@ -32,7 +34,15 @@ rpi-cli
 | **rpi-core** | Core types (`Message`, `ToolCall`, `ChatResponse`), traits (`Provider`, `Tool`, `Agent`), error types, and the agent loop implementation |
 | **rpi-ai** | LLM provider implementations for OpenAI (and compatible APIs), Anthropic, and Ollama. Includes SSE streaming support |
 | **rpi-tools** | Built-in tools: `read_file`, `write_file`, `edit_file`, `bash`, `grep`, `ls` |
+| **rpi-tui** | Experimental terminal UI rendering primitives for interactive mode |
 | **rpi-cli** | CLI binary with argument parsing, configuration management, and interactive mode |
+
+### Workspace Boundaries
+
+Phase 0 intentionally keeps the current five-crate workspace. New crates should
+wait until at least two existing crates need the same stable abstraction. Likely
+future extraction candidates are config/auth storage, JSONL session persistence,
+and the extensions system.
 
 ## Features
 

@@ -31,7 +31,7 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 
 # Async traits
-async-trait = "0.1"
+async-trait = { workspace = true }
 
 [lints.rust]
 missing_docs = "warn"

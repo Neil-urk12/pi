@@ -163,6 +163,13 @@ pub fn estimate_tokens(message: &Message) -> u32 {
                         }
                     }
                     ContentBlock::Image { .. } => chars += IMAGE_APPROX_CHARS,
+                    ContentBlock::Thinking { thinking, .. } => {
+                        chars += thinking.chars().count() as u64;
+                        let block_type = detect_content_type(thinking);
+                        if block_type != ContentType::Default {
+                            content_type = block_type;
+                        }
+                    }
                     ContentBlock::ToolUse { name, input, .. } => {
                         chars += name.chars().count() as u64;
                         chars += input.to_string().chars().count() as u64;
@@ -193,15 +200,20 @@ pub fn estimate_tokens(message: &Message) -> u32 {
     chars.div_ceil(divisor).min(u32::MAX as u64) as u32
 }
 
+/// Estimate token count for a single message using a provider/model-specific strategy.
+pub fn estimate_tokens_for_provider_model(provider: &str, model: &str, message: &Message) -> u32 {
+    try_estimate_tokens_with_tiktoken(provider, model, message)
+        .unwrap_or_else(|| estimate_tokens(message))
+}
+
 /// Estimate total context tokens for a set of messages.
 /// Uses usage-based estimation when available, heuristic fallback.
 pub fn estimate_context_tokens(messages: &[Message], last_usage: Option<&Usage>) -> u32 {
     match last_usage {
         Some(usage) if usage.total_tokens > 0 => {
             if let Some(last_idx) = messages.iter().rposition(|m| m.role == Role::Assistant) {
-                let trailing = sum_tokens_saturating(
-                    messages.iter().skip(last_idx + 1).map(estimate_tokens),
-                );
+                let trailing =
+                    sum_tokens_saturating(messages.iter().skip(last_idx + 1).map(estimate_tokens));
                 usage.total_tokens.saturating_add(trailing)
             } else {
                 sum_tokens_saturating(messages.iter().map(estimate_tokens))
@@ -211,9 +223,146 @@ pub fn estimate_context_tokens(messages: &[Message], last_usage: Option<&Usage>)
     }
 }
 
+/// Estimate total context tokens using a provider/model-specific strategy.
+///
+/// OpenAI-compatible models with known tiktoken encodings use `tiktoken-rs`.
+/// Other providers and unsupported model names fall back to the heuristic path.
+pub fn estimate_context_tokens_for_provider_model(
+    provider: &str,
+    model: &str,
+    messages: &[Message],
+    last_usage: Option<&Usage>,
+) -> u32 {
+    match last_usage {
+        Some(usage) if usage.total_tokens > 0 => {
+            if let Some(last_idx) = messages.iter().rposition(|m| m.role == Role::Assistant) {
+                let trailing = estimate_context_without_usage_for_provider_model(
+                    provider,
+                    model,
+                    &messages[last_idx + 1..],
+                );
+                usage.total_tokens.saturating_add(trailing)
+            } else {
+                estimate_context_without_usage_for_provider_model(provider, model, messages)
+            }
+        }
+        _ => estimate_context_without_usage_for_provider_model(provider, model, messages),
+    }
+}
+
+fn estimate_context_without_usage_for_provider_model(
+    provider: &str,
+    model: &str,
+    messages: &[Message],
+) -> u32 {
+    try_estimate_context_with_tiktoken(provider, model, messages)
+        .unwrap_or_else(|| estimate_context_tokens(messages, None))
+}
+
 /// Sum token estimates with saturating arithmetic (no overflow panic).
 pub fn sum_tokens_saturating<I: Iterator<Item = u32>>(iter: I) -> u32 {
     iter.fold(0u32, |acc, x| acc.saturating_add(x))
+}
+
+fn try_estimate_context_with_tiktoken(
+    provider: &str,
+    model: &str,
+    messages: &[Message],
+) -> Option<u32> {
+    let model = tiktoken_model_name(provider, model)?;
+    if messages
+        .iter()
+        .any(message_has_tiktoken_unsupported_content)
+    {
+        return None;
+    }
+
+    let tiktoken_messages: Vec<_> = messages.iter().map(to_tiktoken_message).collect();
+    let tokens = tiktoken_rs::num_tokens_from_messages(model, &tiktoken_messages).ok()?;
+    Some(tokens.min(u32::MAX as usize) as u32)
+}
+
+fn try_estimate_tokens_with_tiktoken(
+    provider: &str,
+    model: &str,
+    message: &Message,
+) -> Option<u32> {
+    try_estimate_context_with_tiktoken(provider, model, std::slice::from_ref(message))
+}
+
+fn tiktoken_model_name<'a>(provider: &str, model: &'a str) -> Option<&'a str> {
+    if let Some((explicit_provider, explicit_model)) = model.split_once('/') {
+        return explicit_provider
+            .eq_ignore_ascii_case("openai")
+            .then_some(explicit_model);
+    }
+
+    provider.eq_ignore_ascii_case("openai").then_some(model)
+}
+
+fn message_has_tiktoken_unsupported_content(message: &Message) -> bool {
+    match &message.content {
+        Some(MessageContent::Blocks(blocks)) => blocks
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. })),
+        _ => false,
+    }
+}
+
+fn to_tiktoken_message(message: &Message) -> tiktoken_rs::ChatCompletionRequestMessage {
+    tiktoken_rs::ChatCompletionRequestMessage {
+        role: role_as_str(&message.role).to_string(),
+        content: content_as_tiktoken_text(message.content.as_ref()),
+        name: message.name.clone(),
+        tool_calls: message
+            .tool_calls
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|tool_call| tiktoken_rs::FunctionCall {
+                name: tool_call.function.name.clone(),
+                arguments: tool_call.function.arguments.clone(),
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn role_as_str(role: &Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+fn content_as_tiktoken_text(content: Option<&MessageContent>) -> Option<String> {
+    match content? {
+        MessageContent::Text(text) => Some(text.clone()),
+        MessageContent::Blocks(blocks) => {
+            let mut parts = Vec::new();
+            for block in blocks {
+                match block {
+                    ContentBlock::Text { text } => parts.push(text.clone()),
+                    ContentBlock::Thinking { thinking, .. } => {
+                        parts.push(format!("<thinking>{thinking}</thinking>"));
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        parts.push(format!("{name} {}", input));
+                    }
+                    ContentBlock::ToolResult { content, .. } => parts.push(content.clone()),
+                    ContentBlock::Image { .. } => {}
+                }
+            }
+
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -289,6 +438,84 @@ mod tests {
         let messages = vec![text_message("hello"), text_message("world")];
         // "hello" = 5 chars → 2 tokens, "world" = 5 chars → 2 tokens
         assert_eq!(estimate_context_tokens(&messages, None), 4);
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_for_openai_model_uses_tiktoken() {
+        let messages = vec![text_message("hello world")];
+        let expected = tiktoken_rs::num_tokens_from_messages(
+            "gpt-4o",
+            &[tiktoken_rs::ChatCompletionRequestMessage {
+                role: "user".to_string(),
+                content: Some("hello world".to_string()),
+                ..Default::default()
+            }],
+        )
+        .expect("gpt-4o tokenizer should be available") as u32;
+
+        assert_ne!(estimate_context_tokens(&messages, None), expected);
+        assert_eq!(
+            estimate_context_tokens_for_provider_model("openai", "gpt-4o", &messages, None),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_for_unsupported_model_falls_back() {
+        let messages = vec![text_message("hello world")];
+
+        assert_eq!(
+            estimate_context_tokens_for_provider_model(
+                "openai",
+                "custom-local-model",
+                &messages,
+                None
+            ),
+            estimate_context_tokens(&messages, None)
+        );
+        assert_eq!(
+            estimate_context_tokens_for_provider_model(
+                "anthropic",
+                "claude-sonnet-4",
+                &messages,
+                None
+            ),
+            estimate_context_tokens(&messages, None)
+        );
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_for_openai_usage_counts_trailing_slice() {
+        let messages = vec![
+            text_message("before"),
+            Message {
+                role: Role::Assistant,
+                content: Some(MessageContent::Text("response".to_string())),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            },
+            text_message("tail message"),
+        ];
+        let usage = Usage {
+            prompt_tokens: 70,
+            completion_tokens: 30,
+            total_tokens: 100,
+        };
+        let expected_trailing = tiktoken_rs::num_tokens_from_messages(
+            "gpt-4o",
+            &[tiktoken_rs::ChatCompletionRequestMessage {
+                role: "user".to_string(),
+                content: Some("tail message".to_string()),
+                ..Default::default()
+            }],
+        )
+        .expect("gpt-4o tokenizer should be available") as u32;
+
+        assert_eq!(
+            estimate_context_tokens_for_provider_model("openai", "gpt-4o", &messages, Some(&usage),),
+            100 + expected_trailing
+        );
     }
 
     #[test]
@@ -560,18 +787,17 @@ mod tests {
         };
         // Should NOT wrap around (i.e., result >= usage.total_tokens).
         let result = estimate_context_tokens(&messages, Some(&usage));
-        assert!(result >= usage.total_tokens, "token count wrapped around: {result}");
+        assert!(
+            result >= usage.total_tokens,
+            "token count wrapped around: {result}"
+        );
     }
 
     #[test]
     fn test_estimate_context_tokens_saturates_at_max() {
         // total_tokens = u32::MAX with trailing messages should saturate, not wrap.
         let big_trailing = user_msg(&"x".repeat(100_000)); // ~25k tokens
-        let messages = vec![
-            user_msg("hello"),
-            assistant_msg("world"),
-            big_trailing,
-        ];
+        let messages = vec![user_msg("hello"), assistant_msg("world"), big_trailing];
         let usage = Usage {
             prompt_tokens: u32::MAX,
             completion_tokens: 0,

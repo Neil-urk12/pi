@@ -117,7 +117,7 @@ mod tests {
         // Each 'ä' is 2 bytes in UTF-8
         let mut result = String::new();
         for _ in 0..300 {
-            result.push_str("ä");
+            result.push('ä');
         }
         // 600 bytes total, should truncate at 500 chars (not bytes)
         let formatted = format_tool_result_for_display(&result, false);

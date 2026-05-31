@@ -314,7 +314,10 @@ impl Session {
         for id in &path_ids {
             if let Some(summary) = summaries_before.remove(id) {
                 let msg = crate::agent_loop::create_compaction_summary_message(&summary);
-                result.push(ContextMessage { message: msg, entry_id: None });
+                result.push(ContextMessage {
+                    message: msg,
+                    entry_id: None,
+                });
             }
 
             if compacted.contains(id) {
@@ -828,11 +831,19 @@ mod tests {
 
         // Deleting a session that was never created should succeed.
         let result = manager.delete("nonexistent-session-id");
-        assert!(result.is_ok(), "delete() on missing session should be Ok, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "delete() on missing session should be Ok, got: {:?}",
+            result
+        );
 
         // Deleting twice should also succeed.
         let result = manager.delete("nonexistent-session-id");
-        assert!(result.is_ok(), "second delete() on missing session should be Ok, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "second delete() on missing session should be Ok, got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -984,7 +995,7 @@ mod tests {
         let mut session = Session::new("openai/gpt-4o");
 
         // Create original branch
-        let e0 = session.append_message(user_msg("msg 0"));
+        let _e0 = session.append_message(user_msg("msg 0"));
         let e1 = session.append_message(assistant_msg("msg 1"));
 
         // Create compaction pointing to e1 as first_kept
