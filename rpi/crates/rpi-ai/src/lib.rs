@@ -45,6 +45,7 @@ pub mod cloudflare;
 pub mod openai;
 pub mod provider;
 pub mod streaming;
+pub mod reconnect;
 
 // Re-export the factory for convenience.
 pub use provider::create_provider;

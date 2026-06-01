@@ -33,6 +33,8 @@ unicode-width = "0.2"
 
 # Error handling
 anyhow = "1"
+# Randomization
+rand = "0.9"
 thiserror = "2"
 
 # Logging

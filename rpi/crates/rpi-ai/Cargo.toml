@@ -29,6 +29,8 @@ tracing = { workspace = true }
 
 # Error handling
 anyhow = { workspace = true }
+# Randomization (for jitter)
+rand = { workspace = true }
 
 # Async traits
 async-trait = { workspace = true }

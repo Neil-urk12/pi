@@ -1244,6 +1244,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "rand",
  "reqwest",
  "rpi-core",
  "serde",

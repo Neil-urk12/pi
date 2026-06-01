@@ -31,6 +31,46 @@ impl SseEvent {
     }
 }
 
+
+/// Typed errors for SSE stream operations.
+///
+/// Enables programmatic error matching instead of fragile string parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SseError {
+    /// The stream was idle for longer than the configured timeout.
+    IdleTimeout {
+        /// The timeout duration in milliseconds.
+        timeout_ms: u64,
+    },
+    /// An error occurred while reading from the underlying byte stream.
+    ReadError {
+        /// The error message from the underlying IO error.
+        message: String,
+    },
+}
+
+impl SseError {
+    /// Returns true if this error is retryable (connection can be retried).
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, SseError::IdleTimeout { .. } | SseError::ReadError { .. })
+    }
+}
+
+impl std::fmt::Display for SseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SseError::IdleTimeout { timeout_ms } => {
+                write!(f, "SSE stream idle timeout after {}ms", timeout_ms)
+            }
+            SseError::ReadError { message } => {
+                write!(f, "SSE stream read error: {}", message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SseError {}
+
 /// Convert a [`reqwest::Response`] into a stream of [`SseEvent`]s.
 ///
 /// Handles the SSE wire protocol: line buffering, multi-line `data:` fields,
@@ -45,10 +85,16 @@ pub fn sse_stream(
     sse_events_from_byte_stream(response.bytes_stream(), None)
 }
 
-/// Convert a [`reqwest::Response`] into a stream of [`SseEvent`]s with an idle timeout.
+
+/// Similar to [`sse_stream`], but with configurable idle timeout.
 ///
-/// The timeout is applied between incoming byte chunks. If no chunk arrives
-/// before `idle_timeout`, the stream yields an error and terminates.
+/// If no data arrives within the specified `idle_timeout`, the stream yields
+/// an error and terminates.
+///
+/// # Errors
+///
+/// Yields `Err` if the underlying byte stream encounters a read error or if
+/// `idle_timeout` expires.
 pub fn sse_stream_with_idle_timeout(
     response: reqwest::Response,
     idle_timeout: Duration,
@@ -74,7 +120,9 @@ where
                 match tokio::time::timeout(timeout, byte_stream.next()).await {
                     Ok(next_chunk) => next_chunk,
                     Err(_) => {
-                        yield Err(anyhow::anyhow!("SSE stream idle timeout after {}ms", timeout.as_millis()));
+                        yield Err(anyhow::Error::new(SseError::IdleTimeout {
+                        timeout_ms: timeout.as_millis() as u64,
+                    }));
                         return;
                     }
                 }
@@ -89,7 +137,9 @@ where
             let chunk = match chunk_result {
                 Ok(c) => c,
                 Err(e) => {
-                    yield Err(anyhow::anyhow!("SSE stream read error: {e}"));
+                    yield Err(anyhow::Error::new(SseError::ReadError {
+                    message: e.to_string(),
+                }));
                     return;
                 }
             };
@@ -218,5 +268,59 @@ mod tests {
         assert_eq!(event.data, "hello \u{20ac} world");
         // Must NOT contain replacement character U+FFFD
         assert!(!event.data.contains('\u{fffd}'), "data contained U+FFFD: {:?}", event.data);
+    }
+
+    #[test]
+    fn sse_stream_error_has_typed_variants() {
+        // Test that we can match on error type instead of string content
+        use super::SseError;
+
+        // Test idle timeout variant
+        let timeout_err = SseError::IdleTimeout { timeout_ms: 5000 };
+        assert!(matches!(timeout_err, SseError::IdleTimeout { .. }));
+        assert!(timeout_err.is_retryable());
+
+        // Test read error variant
+        let read_err = SseError::ReadError { message: "connection reset".to_string() };
+        assert!(matches!(read_err, SseError::ReadError { .. }));
+        assert!(read_err.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn sse_stream_yields_typed_timeout_error() {
+        // Test that idle timeout produces SseError::IdleTimeout
+        let chunks = stream::pending::<Result<Vec<u8>, std::io::Error>>();
+
+        let results = collect_sse_events(sse_events_from_byte_stream(
+            chunks,
+            Some(Duration::from_millis(1)),
+        )).await;
+
+        assert_eq!(results.len(), 1);
+        let error = results[0].as_ref().expect_err("should be error");
+
+        // Downcast anyhow error to SseError
+        let sse_error = error.downcast_ref::<SseError>().expect("should be SseError");
+        assert!(matches!(sse_error, SseError::IdleTimeout { .. }));
+    }
+
+    #[tokio::test]
+    async fn sse_stream_yields_typed_read_error() {
+        // Test that read errors produce SseError::ReadError
+        use std::io;
+
+        let chunks = stream::iter(vec![Err::<Vec<u8>, _>(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "connection reset",
+        ))]);
+
+        let results = collect_sse_events(sse_events_from_byte_stream(chunks, None)).await;
+
+        assert_eq!(results.len(), 1);
+        let error = results[0].as_ref().expect_err("should be error");
+
+        // Downcast anyhow error to SseError
+        let sse_error = error.downcast_ref::<SseError>().expect("should be SseError");
+        assert!(matches!(sse_error, SseError::ReadError { .. }));
     }
 }
