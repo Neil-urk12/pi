@@ -30,6 +30,11 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_TOOL_CALL_ID_MAX_LEN: usize = 64;
 
+/// Beta header for interleaved thinking support.
+const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
+/// Beta header for fine-grained tool streaming.
+const FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -86,6 +91,15 @@ impl AnthropicProvider {
             "anthropic-version",
             API_VERSION.parse().expect("valid header value"),
         );
+
+        // Add beta headers for thinking and tool streaming support.
+        let beta_value = format!("{},{}", INTERLEAVED_THINKING_BETA, FINE_GRAINED_TOOL_STREAMING_BETA);
+        headers.insert(
+            "anthropic-beta",
+            reqwest::header::HeaderValue::from_str(&beta_value)
+                .expect("valid header value"),
+        );
+
         Ok(headers)
     }
 }
@@ -410,6 +424,15 @@ fn process_anthropic_event(
 // Request / response types (internal)
 // ---------------------------------------------------------------------------
 
+/// Thinking configuration for Anthropic API.
+#[derive(Serialize, Debug, Clone)]
+struct AnthropicThinking {
+    #[serde(rename = "type")]
+    thinking_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_tokens: Option<u32>,
+}
+
 #[derive(Serialize)]
 struct AnthropicRequest {
     model: String,
@@ -422,6 +445,9 @@ struct AnthropicRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
+    /// Thinking/reasoning configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<AnthropicThinking>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -466,11 +492,23 @@ struct AnthropicImageSource {
     data: String,
 }
 
+/// Cache control marker for Anthropic API.
+#[derive(Serialize, Debug, Clone)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ttl: Option<String>,
+}
+
 #[derive(Serialize)]
 struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    /// Cache control for this tool definition.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 // -- Non-streaming response --
@@ -597,6 +635,17 @@ fn build_request(
     );
     let (system, anthropic_msgs) = to_anthropic_messages(&normalized_messages);
 
+    // Enable thinking if model supports it (Claude 3.5+ models).
+    // TODO: Integrate with ThinkingLevel from config when available.
+    let thinking = if model.contains("claude-3-5") || model.contains("claude-3.5") || model.starts_with("claude-4") || model.contains("claude-sonnet-4") {
+        Some(AnthropicThinking {
+            thinking_type: "enabled".to_string(),
+            budget_tokens: Some(10000),
+        })
+    } else {
+        None
+    };
+
     AnthropicRequest {
         model: model.to_string(),
         max_tokens: config.max_tokens.unwrap_or(4096),
@@ -605,19 +654,27 @@ fn build_request(
         tools: if tools.is_empty() {
             None
         } else {
-            Some(
-                tools
-                    .iter()
-                    .map(|t| AnthropicTool {
-                        name: t.name.clone(),
-                        description: t.description.clone(),
-                        input_schema: t.parameters.clone(),
-                    })
-                    .collect(),
-            )
+            let mut anthropic_tools: Vec<AnthropicTool> = tools
+                .iter()
+                .map(|t| AnthropicTool {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    input_schema: t.parameters.clone(),
+                    cache_control: None,
+                })
+                .collect();
+            // Add cache control to last tool for prompt caching.
+            if let Some(last) = anthropic_tools.last_mut() {
+                last.cache_control = Some(CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                    ttl: None,
+                });
+            }
+            Some(anthropic_tools)
         },
         stream,
         temperature: config.temperature,
+        thinking,
     }
 }
 
@@ -1363,5 +1420,27 @@ mod tests {
             matches!(block, AnthropicContentValue::Text { text } if text == "You should try X.")
         });
         assert!(has_text, "Assistant message should contain text block");
+    }
+
+    #[test]
+    fn build_request_enables_thinking_for_claude_sonnet_4() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: Some(MessageContent::Text("Hello".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }];
+
+        // claude-sonnet-4 should get thinking enabled
+        let request = build_request("claude-sonnet-4-20250514", &messages, &[], &test_config(), false);
+        assert!(request.thinking.is_some(), "claude-sonnet-4 should have thinking enabled");
+        let thinking = request.thinking.unwrap();
+        assert_eq!(thinking.thinking_type, "enabled");
+        assert!(thinking.budget_tokens.is_some());
+
+        // claude-3-opus should NOT get thinking (no reasoning support)
+        let request = build_request("claude-3-opus-20240229", &messages, &[], &test_config(), false);
+        assert!(request.thinking.is_none(), "claude-3-opus should not have thinking enabled");
     }
 }

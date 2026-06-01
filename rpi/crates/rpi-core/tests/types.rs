@@ -90,6 +90,7 @@ fn model_metadata_round_trips_with_reasoning_and_compat_flags() {
                 requires_thinking_as_text: Some(false),
                 supports_strict_mode: Some(true),
                 supports_long_cache_retention: Some(true),
+                thinking_format: None,
             }),
             ..CompatFlags::default()
         }),

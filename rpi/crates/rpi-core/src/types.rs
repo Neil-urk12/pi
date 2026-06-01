@@ -238,6 +238,30 @@ pub struct ModelCost {
     pub cache_write: f64,
 }
 
+
+/// Thinking/reasoning format for OpenAI-compatible APIs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ThinkingFormat {
+    /// No thinking support.
+    #[default]
+    None,
+    /// Standard OpenAI reasoning_effort parameter.
+    OpenAi,
+    /// OpenRouter reasoning object format.
+    OpenRouter,
+    /// DeepSeek thinking type format.
+    DeepSeek,
+    /// Together AI reasoning enabled format.
+    Together,
+    /// Z.ai enable_thinking boolean.
+    Zai,
+    /// Qwen enable_thinking boolean.
+    Qwen,
+    /// Qwen chat_template_kwargs format.
+    QwenChatTemplate,
+}
+
 /// Compatibility flags for OpenAI-compatible completions APIs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenAiCompat {
@@ -271,6 +295,9 @@ pub struct OpenAiCompat {
     /// Whether long prompt-cache retention is supported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supports_long_cache_retention: Option<bool>,
+    /// Thinking/reasoning format for this provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_format: Option<ThinkingFormat>,
 }
 
 /// Compatibility flags for Anthropic Messages-compatible APIs.

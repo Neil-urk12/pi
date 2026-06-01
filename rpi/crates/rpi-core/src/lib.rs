@@ -57,5 +57,5 @@ pub use types::{
     ChatResponse, CompatFlags, ContentBlock, FinishReason, FunctionCall, GoogleCompat, Message,
     MessageContent, Model, ModelCost, ModelId, ModelInputKind, OpenAiCompat, ProviderCapabilities,
     ProviderConfig, ProviderMetadata, ProviderRequestConfig, Role, StopReason, StreamOptions,
-    ThinkingLevel, ToolCall, ToolDefinition, Transport, Usage,
+    ThinkingFormat, ThinkingLevel, ToolCall, ToolDefinition, Transport, Usage,
 };

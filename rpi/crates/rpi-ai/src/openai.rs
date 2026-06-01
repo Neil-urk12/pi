@@ -14,6 +14,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use rpi_core::{
+    ThinkingFormat,
     AgentConfig, ChatResponse, ChatStream, CompatFlags, ContentBlock, FinishReason, FunctionCall,
     Message, MessageContent, ModelInputKind, OpenAiCompat, PiError, ProviderCapabilities,
     ProviderError, ProviderMetadata, Result, Role, StreamChunk, ToolCall, ToolCallDelta,
@@ -225,6 +226,23 @@ fn detect_openai_compat(base_url: &str) -> OpenAiCompat {
     let use_max_tokens =
         base_url.contains("chutes.ai") || is_moonshot || is_cloudflare_ai_gateway || is_together;
 
+    // Determine thinking format based on provider.
+    let thinking_format = if is_deepseek {
+        ThinkingFormat::DeepSeek
+    } else if base_url.contains("openrouter.ai") {
+        ThinkingFormat::OpenRouter
+    } else if is_together {
+        ThinkingFormat::Together
+    } else if is_zai {
+        ThinkingFormat::Zai
+    } else if base_url.contains("qwen") || base_url.contains("dashscope") {
+        ThinkingFormat::Qwen
+    } else if base_url.contains("api.openai.com") || base_url.contains("openai.azure.com") {
+        ThinkingFormat::OpenAi
+    } else {
+        ThinkingFormat::None
+    };
+
     OpenAiCompat {
         supports_store: Some(!is_non_standard),
         supports_developer_role: Some(!is_non_standard),
@@ -247,6 +265,7 @@ fn detect_openai_compat(base_url: &str) -> OpenAiCompat {
         supports_long_cache_retention: Some(
             !(is_together || is_cloudflare_workers_ai || is_cloudflare_ai_gateway),
         ),
+        thinking_format: Some(thinking_format),
     }
 }
 
@@ -307,7 +326,16 @@ fn openai_sse_to_chunks(
                         .as_deref()
                         .and_then(parse_finish_reason);
 
-                    let delta = choice.delta.as_ref().and_then(|d| d.content.clone());
+                    // Extract reasoning/thinking content from various field names.
+                    let reasoning_delta = choice.delta.as_ref().and_then(|d| {
+                        d.reasoning_content.as_deref()
+                            .or_else(|| d.reasoning_text.as_deref())
+                            .or_else(|| d.reasoning.as_ref().and_then(|v| v.as_str()))
+                            .map(|s| s.to_string())
+                    });
+
+                    let delta = choice.delta.as_ref().and_then(|d| d.content.clone())
+                        .or(reasoning_delta);
 
                     let tool_calls = choice
                         .delta
@@ -462,6 +490,15 @@ struct OpenAiDelta {
     role: Option<String>,
     content: Option<String>,
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
+    /// DeepSeek reasoning_content field.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    /// Generic reasoning field (some providers).
+    #[serde(default)]
+    reasoning: Option<serde_json::Value>,
+    /// reasoning_text field (some providers).
+    #[serde(default)]
+    reasoning_text: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -539,6 +576,40 @@ fn build_request(
                 if let Some(val) = obj.remove("max_tokens") {
                     obj.insert(field_name.to_string(), val);
                 }
+            }
+        }
+    }
+
+    // Add thinking/reasoning parameters based on format.
+    // TODO: Integrate with ThinkingLevel from config when available.
+    if let Some(thinking_format) = &compat.thinking_format {
+        if let Some(obj) = value.as_object_mut() {
+            match thinking_format {
+                ThinkingFormat::OpenAi => {
+                    // Standard reasoning_effort parameter.
+                    obj.insert("reasoning_effort".to_string(), serde_json::json!("medium"));
+                }
+                ThinkingFormat::OpenRouter => {
+                    // OpenRouter reasoning object format.
+                    obj.insert("reasoning".to_string(), serde_json::json!({"effort": "medium"}));
+                }
+                ThinkingFormat::DeepSeek => {
+                    // DeepSeek thinking type format.
+                    obj.insert("thinking".to_string(), serde_json::json!({"type": "enabled"}));
+                }
+                ThinkingFormat::Together => {
+                    // Together AI reasoning enabled format.
+                    obj.insert("reasoning".to_string(), serde_json::json!({"enabled": true}));
+                }
+                ThinkingFormat::Zai | ThinkingFormat::Qwen => {
+                    // Z.ai / Qwen enable_thinking boolean.
+                    obj.insert("enable_thinking".to_string(), serde_json::json!(true));
+                }
+                ThinkingFormat::QwenChatTemplate => {
+                    // Qwen chat_template_kwargs format.
+                    obj.insert("chat_template_kwargs".to_string(), serde_json::json!({"enable_thinking": true}));
+                }
+                ThinkingFormat::None => {}
             }
         }
     }
@@ -698,7 +769,7 @@ fn parse_finish_reason(reason: &str) -> Option<FinishReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rpi_core::{ModelId, Provider, ProviderError};
+    use rpi_core::{ThinkingFormat, ModelId, Provider, ProviderError};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -1097,5 +1168,83 @@ mod tests {
             results.iter().all(|r| r.is_ok()),
             "expected no errors, got: {results:?}"
         );
+    }
+
+    #[test]
+    fn metadata_detects_thinking_format_per_provider() {
+        // DeepSeek
+        let provider =
+            OpenAiProvider::with_base_url("https://api.deepseek.com/v1", Some("key"));
+        let compat = provider.metadata().compat.openai.unwrap();
+        assert_eq!(compat.thinking_format, Some(ThinkingFormat::DeepSeek));
+
+        // OpenRouter
+        let provider =
+            OpenAiProvider::with_base_url("https://openrouter.ai/api/v1", Some("key"));
+        let compat = provider.metadata().compat.openai.unwrap();
+        assert_eq!(compat.thinking_format, Some(ThinkingFormat::OpenRouter));
+
+        // Together
+        let provider =
+            OpenAiProvider::with_base_url("https://api.together.xyz/v1", Some("key"));
+        let compat = provider.metadata().compat.openai.unwrap();
+        assert_eq!(compat.thinking_format, Some(ThinkingFormat::Together));
+
+        // OpenAI native
+        let provider = OpenAiProvider::new("test-key");
+        let compat = provider.metadata().compat.openai.unwrap();
+        assert_eq!(compat.thinking_format, Some(ThinkingFormat::OpenAi));
+
+        // Unknown provider
+        let provider =
+            OpenAiProvider::with_base_url("https://unknown.example.com/v1", Some("key"));
+        let compat = provider.metadata().compat.openai.unwrap();
+        assert_eq!(compat.thinking_format, Some(ThinkingFormat::None));
+    }
+
+    #[test]
+    fn build_request_injects_thinking_params_for_openai_format() {
+        let config = test_config();
+        let compat = OpenAiCompat {
+            thinking_format: Some(ThinkingFormat::OpenAi),
+            ..OpenAiCompat::default()
+        };
+        let body = build_request("gpt-4o", &[], &[], &config, false, &compat);
+        assert_eq!(body["reasoning_effort"], serde_json::json!("medium"));
+    }
+
+    #[test]
+    fn build_request_injects_thinking_params_for_deepseek_format() {
+        let config = test_config();
+        let compat = OpenAiCompat {
+            thinking_format: Some(ThinkingFormat::DeepSeek),
+            ..OpenAiCompat::default()
+        };
+        let body = build_request("deepseek-chat", &[], &[], &config, false, &compat);
+        assert_eq!(body["thinking"], serde_json::json!({"type": "enabled"}));
+    }
+
+    #[test]
+    fn build_request_injects_thinking_params_for_openrouter_format() {
+        let config = test_config();
+        let compat = OpenAiCompat {
+            thinking_format: Some(ThinkingFormat::OpenRouter),
+            ..OpenAiCompat::default()
+        };
+        let body = build_request("model", &[], &[], &config, false, &compat);
+        assert_eq!(body["reasoning"], serde_json::json!({"effort": "medium"}));
+    }
+
+    #[test]
+    fn build_request_no_thinking_params_when_format_is_none() {
+        let config = test_config();
+        let compat = OpenAiCompat {
+            thinking_format: Some(ThinkingFormat::None),
+            ..OpenAiCompat::default()
+        };
+        let body = build_request("gpt-4o", &[], &[], &config, false, &compat);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("reasoning").is_none());
     }
 }
