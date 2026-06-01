@@ -902,3 +902,78 @@ fn yank_pop_repeated() {
     assert_eq!(input.text(), "ccaa bb ");
     assert_eq!(input.cursor(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Kill ring cap
+
+// --- Kill ring boundary ---
+// ---------------------------------------------------------------------------
+
+#[test]
+fn kill_ring_preserves_all_at_exact_capacity() {
+    let mut input = Input::new();
+
+    // Create exactly 60 non-consecutive kill entries (MAX_KILL_RING = 60).
+    for i in 1..=60 {
+        type_str(&mut input, &format!("word{i:03}"));
+        input.handle_key(ctrl('w'));
+        assert_eq!(input.text(), "", "text should be empty after kill #{i}");
+    }
+
+    // Yank the most recent kill — should be word060.
+    input.handle_key(ctrl('y'));
+    assert_eq!(input.text(), "word060");
+
+    // Cycle through all remaining entries via Alt+Y.
+    // Expect word059 → word058 → ... → word001, then wrap back to word060.
+    for i in (1..60).rev() {
+        input.handle_key(alt('y'));
+        assert_eq!(
+            input.text(),
+            format!("word{i:03}"),
+            "yank_pop should reach word{i:03}"
+        );
+    }
+
+    // Wrap around to the most recent entry again.
+    input.handle_key(alt('y'));
+    assert_eq!(input.text(), "word060");
+}
+
+#[test]
+fn kill_ring_capped_at_max() {
+    let mut input = Input::new();
+
+    // Create 61 non-consecutive kill entries.
+    // Typing breaks `last_was_kill`, so each Ctrl+W creates a new entry.
+    for i in 1..=61 {
+        type_str(&mut input, &format!("word{i:03}"));
+        input.handle_key(ctrl('w'));
+        assert_eq!(input.text(), "", "text should be empty after kill #{i}");
+    }
+
+    // Yank the most recent kill — should be word061.
+    input.handle_key(ctrl('a'));
+    input.handle_key(ctrl('y'));
+    assert_eq!(input.text(), "word061");
+
+    // Alt+Y through the ring. We have 60 entries (word001 was dropped).
+    // Expected order: word060, word059, ..., word002, then wraps to word061.
+    for i in (2..=60).rev() {
+        input.handle_key(alt('y'));
+        let expected = format!("word{i:03}");
+        assert_eq!(
+            input.text(),
+            expected,
+            "yank_pop expected {expected}, got {}",
+            input.text()
+        );
+    }
+
+    // One more yank_pop wraps back to word061.
+    input.handle_key(alt('y'));
+    assert_eq!(input.text(), "word061");
+
+    // word001 should never have been accessible — verify by cycling full ring
+    // and checking it never appeared (already covered by the 2..=60 range above).
+}

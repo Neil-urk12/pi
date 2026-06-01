@@ -12,12 +12,13 @@ fn is_punctuation(c: char) -> bool {
 
 /// Maximum undo history depth.
 const MAX_UNDO: usize = 100;
+const MAX_KILL_RING: usize = 60;
 struct UndoEntry {
     text: String,
     cursor: usize,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum LastAction {
     TypeWord,
     Kill,
@@ -29,7 +30,7 @@ pub struct Input {
     text: String,
     cursor_pos: usize,
     undo_stack: VecDeque<UndoEntry>,
-    kill_ring: Vec<String>,
+    kill_ring: VecDeque<String>,
     last_was_kill: bool,
     last_action: LastAction,
     on_submit: Option<SubmitCallback>,
@@ -42,7 +43,7 @@ impl Input {
             text: String::new(),
             cursor_pos: 0,
             undo_stack: VecDeque::new(),
-            kill_ring: Vec::new(),
+            kill_ring: VecDeque::new(),
             last_was_kill: false,
             last_action: LastAction::Other,
             on_submit: None,
@@ -166,10 +167,10 @@ impl Input {
                 let start = self.prev_word_boundary();
                 let killed: String = self.text.chars().skip(start).take(end - start).collect();
                 if self.last_was_kill && !self.kill_ring.is_empty() {
-                    let last = self.kill_ring.last_mut().unwrap();
+                    let last = self.kill_ring.back_mut().unwrap();
                     *last = format!("{}{}", killed, last);
                 } else {
-                    self.kill_ring.push(killed);
+                    self.push_kill(killed);
                 };
                 let start_byte = self.char_to_byte(start);
                 let end_byte = self.char_to_byte(end);
@@ -189,10 +190,10 @@ impl Input {
                 let end = self.next_word_boundary();
                 let killed: String = self.text.chars().skip(start).take(end - start).collect();
                 if self.last_was_kill && !self.kill_ring.is_empty() {
-                    let last = self.kill_ring.last_mut().unwrap();
+                    let last = self.kill_ring.back_mut().unwrap();
                     *last = format!("{}{}", last, killed);
                 } else {
-                    self.kill_ring.push(killed);
+                    self.push_kill(killed);
                 };
                 let start_byte = self.char_to_byte(start);
                 let end_byte = self.char_to_byte(end);
@@ -209,10 +210,10 @@ impl Input {
                 self.push_undo();
                 let killed: String = self.text.chars().take(self.cursor_pos).collect();
                 if self.last_was_kill && !self.kill_ring.is_empty() {
-                    let last = self.kill_ring.last_mut().unwrap();
+                    let last = self.kill_ring.back_mut().unwrap();
                     *last = format!("{}{}", killed, last);
                 } else {
-                    self.kill_ring.push(killed);
+                    self.push_kill(killed);
                 };
                 let end_byte = self.char_to_byte(self.cursor_pos);
                 self.text.drain(0..end_byte);
@@ -229,10 +230,10 @@ impl Input {
                 self.push_undo();
                 let killed: String = self.text.chars().skip(self.cursor_pos).collect();
                 if self.last_was_kill && !self.kill_ring.is_empty() {
-                    let last = self.kill_ring.last_mut().unwrap();
+                    let last = self.kill_ring.back_mut().unwrap();
                     *last = format!("{}{}", last, killed);
                 } else {
-                    self.kill_ring.push(killed);
+                    self.push_kill(killed);
                 };
                 let start_byte = self.char_to_byte(self.cursor_pos);
                 self.text.truncate(start_byte);
@@ -244,7 +245,7 @@ impl Input {
 
         // Yank (Ctrl+Y)
         if mods.contains(Modifiers::CTRL) && key == Key::Char('y') {
-            if let Some(entry) = self.kill_ring.last().cloned() {
+            if let Some(entry) = self.kill_ring.back().cloned() {
                 self.push_undo();
                 let byte_pos = self.char_to_byte(self.cursor_pos);
                 self.text.insert_str(byte_pos, &entry);
@@ -261,7 +262,7 @@ impl Input {
             } else {
                 self.push_undo();
                 // Remove previously yanked text
-                let prev_text = self.kill_ring.last().unwrap();
+                let prev_text = self.kill_ring.back().unwrap();
                 let prev_len = prev_text.chars().count();
                 let start = self.cursor_pos - prev_len;
                 let text: String = self.text.chars().take(start)
@@ -270,10 +271,10 @@ impl Input {
                 self.text = text;
                 self.cursor_pos = start;
                 // Rotate: pop last, insert at front
-                let entry = self.kill_ring.pop().unwrap();
-                self.kill_ring.insert(0, entry);
+                let entry = self.kill_ring.pop_back().unwrap();
+                self.kill_ring.push_front(entry);
                 // Yank new last entry
-                let new_text = self.kill_ring.last().unwrap().clone();
+                let new_text = self.kill_ring.back().unwrap().clone();
                 let new_len = new_text.chars().count();
                 let byte_pos = self.char_to_byte(self.cursor_pos);
                 self.text.insert_str(byte_pos, &new_text);
@@ -371,6 +372,13 @@ impl Input {
         });
     }
 
+    fn push_kill(&mut self, entry: String) {
+        if self.kill_ring.len() >= MAX_KILL_RING {
+            self.kill_ring.pop_front();
+        }
+        self.kill_ring.push_back(entry);
+    }
+
     fn char_to_byte(&self, char_pos: usize) -> usize {
         self.text.char_indices().nth(char_pos).map(|(i, _)| i).unwrap_or(self.text.len())
     }
@@ -418,5 +426,11 @@ impl Input {
             }
         }
         pos
+    }
+}
+
+impl Default for Input {
+    fn default() -> Self {
+        Self::new()
     }
 }
