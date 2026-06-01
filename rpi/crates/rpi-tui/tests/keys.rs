@@ -434,3 +434,28 @@ fn kitty_tilde_shift_f1() {
 fn kitty_tilde_ctrl_f5() {
     assert!(matches_key(b"\x1b[15;5~", KeyEvent { key: Key::Special(SpecialKey::F5), modifiers: Modifiers::CTRL }));
 }
+
+// --- Clear key (KP_BEGIN) ---
+
+#[test]
+fn kitty_clear() {
+    assert!(matches_key(b"\x1b[57427u", KeyEvent { key: Key::Special(SpecialKey::Clear), modifiers: Modifiers::empty() }));
+}
+
+#[test]
+fn kitty_tilde_clear() {
+    assert!(matches_key(b"\x1b[57427~", KeyEvent { key: Key::Special(SpecialKey::Clear), modifiers: Modifiers::empty() }));
+}
+
+#[test]
+fn parse_key_clear() {
+    assert_eq!(parse_key(b"\x1b[E").as_deref(), Some("clear"));
+    assert_eq!(parse_key(b"\x1bOw").as_deref(), Some("clear"));
+}
+
+// --- Double-ESC label ---
+
+#[test]
+fn parse_key_alt_escape() {
+    assert_eq!(parse_key(b"\x1b\x1b").as_deref(), Some("alt+escape"));
+}

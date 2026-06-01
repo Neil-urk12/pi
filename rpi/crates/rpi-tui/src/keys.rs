@@ -112,11 +112,13 @@ pub mod codepoints {
     pub const F10: i32 = -25;
     pub const F11: i32 = -26;
     pub const F12: i32 = -27;
+    // KP_BEGIN (numpad 5 without NumLock, aka Clear)
+    pub const KP_BEGIN: i32 = 57427;
 }
 
 // --- Kitty numpad normalization map ---
 
-/// Maps Kitty numpad codepoints (57399-57426) to their standard equivalents.
+/// Maps Kitty numpad codepoints (57399-57427) to their standard equivalents.
 pub fn normalize_kitty_functional_codepoint(codepoint: i32) -> i32 {
     match codepoint {
         57399 => 48,                            // KP_0 → '0'
@@ -147,6 +149,7 @@ pub fn normalize_kitty_functional_codepoint(codepoint: i32) -> i32 {
         57424 => codepoints::END,               // KP_END
         57425 => codepoints::INSERT,            // KP_INSERT
         57426 => codepoints::DELETE,            // KP_DELETE
+        57427 => codepoints::KP_BEGIN,          // KP_BEGIN (Clear)
         _ => codepoint,
     }
 }
@@ -396,6 +399,9 @@ pub static LEGACY_SEQUENCE_KEY_IDS: LazyLock<Vec<(Vec<u8>, &'static str)>> = Laz
         (b"\x1bOM".to_vec(), "enter"),
         (b"\x1b[Z".to_vec(), "shift+tab"),
         (b"\x00".to_vec(), "ctrl+space"),
+        (b"\x1b[E".to_vec(), "clear"),
+        (b"\x1bOw".to_vec(), "clear"),
+        (b"\x1b[1;2w".to_vec(), "clear"),
     ]
 });
 
@@ -502,6 +508,7 @@ pub(crate) fn parse_kitty_sequence(data: &[u8]) -> Option<ParsedKittySequence> {
             21 => codepoints::F10,
             23 => codepoints::F11,
             24 => codepoints::F12,
+            57427 => codepoints::KP_BEGIN,
             _ => return None,
         };
         return Some(ParsedKittySequence {
@@ -808,7 +815,11 @@ fn match_special_key(data: &[u8], key: SpecialKey, modifiers: Modifiers) -> bool
                 || matches_kitty_sequence(data, codepoints::PAGE_DOWN, modifiers)
                 || matches_modify_other_keys(data, codepoints::PAGE_DOWN, modifiers)
         }
-        SpecialKey::Clear => matches_legacy_key(data, SpecialKey::Clear),
+        SpecialKey::Clear => {
+            matches_legacy_key(data, SpecialKey::Clear)
+                || matches_kitty_sequence(data, codepoints::KP_BEGIN, modifiers)
+                || matches_modify_other_keys(data, codepoints::KP_BEGIN, modifiers)
+        }
         SpecialKey::F1 => {
             matches_legacy_key(data, SpecialKey::F1)
                 || matches_kitty_sequence(data, codepoints::F1, modifiers)
@@ -1044,7 +1055,7 @@ pub fn parse_key(data: &[u8]) -> Option<String> {
     if data.len() == 2 && data[0] == b'\x1b' {
         let b = data[1];
         match b {
-            b'\x1b' => return Some("ctrl+alt+[".to_string()),
+            b'\x1b' => return Some("alt+escape".to_string()),
             b'\r' | b'\n' => return Some("alt+enter".to_string()),
             32..=126 => {
                 let c = b as char;
@@ -1101,6 +1112,7 @@ fn codepoint_to_key_name(codepoint: i32, base_layout: Option<i32>) -> String {
         codepoints::F10 => "f10".to_string(),
         codepoints::F11 => "f11".to_string(),
         codepoints::F12 => "f12".to_string(),
+        codepoints::KP_BEGIN => "clear".to_string(),
         32..=126 if cp == codepoints::SPACE => "space".to_string(),
         32..=126 => (cp as u8 as char).to_string(),
         _ => {
