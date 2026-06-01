@@ -1310,6 +1310,7 @@ dependencies = [
 name = "rpi-tui"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "crossterm",
  "pulldown-cmark",
  "thiserror",

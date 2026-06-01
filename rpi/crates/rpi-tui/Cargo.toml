@@ -9,4 +9,4 @@ crossterm = { workspace = true }
 pulldown-cmark = { workspace = true }
 unicode-width = { workspace = true }
 thiserror = { workspace = true }
-
+bitflags = { workspace = true }
